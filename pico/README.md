@@ -14,13 +14,19 @@ Default pin mapping (override in `config.py` if wired differently):
 
 | RC522 pin | Pico 2 W pin | config.py field |
 |-----------|--------------|------------------|
-| SCK       | GP2          | `SPI_SCK_PIN`    |
-| MOSI      | GP3          | `SPI_MOSI_PIN`   |
 | MISO      | GP4          | `SPI_MISO_PIN`   |
-| RST       | GP0          | `RST_PIN`        |
-| SDA (CS)  | GP1          | `CS_PIN`         |
+| SDA (CS)  | GP5          | `CS_PIN`         |
+| SCK       | GP6          | `SPI_SCK_PIN`    |
+| MOSI      | GP7          | `SPI_MOSI_PIN`   |
+| RST       | GP22         | `RST_PIN`        |
 | VCC       | 3V3          | --               |
 | GND       | GND          | --               |
+
+MISO/CS/SCK/MOSI must stay on the same RP2040/RP2350 hardware SPI0 pin
+group (`machine.SPI` on `rp2` boards uses hardware SPI, not bit-banged) --
+GP4/GP5/GP6/GP7 is that group's alt pin set. `RST_PIN` isn't part of SPI
+and can be any free GPIO; `SPI_ID` in `config.py` must match whichever
+SPI peripheral's pin group you wire to.
 
 Power the Pico from the onboard 503450 LiPo (3.7V, 1000mAh) via a TP4056
 charger into `VSYS`/`GND`.
