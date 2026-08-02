@@ -1,18 +1,20 @@
 # lego-bluetooth-controller
 
-A Python-based controller for LEGO Technic Hubs using Bluetooth Low Energy (BLE) communication. This project allows you to control LEGO switches and trains through both a REST API and command-line interface. It supports advanced features like self-driving trains with color pattern recognition and reliable switch control.
+A Python-based controller for LEGO Technic Hubs using Bluetooth Low Energy (BLE) communication. This project allows you to control LEGO switches and trains through both a REST API and command-line interface. It supports advanced features like self-driving trains with color pattern recognition, reliable switch control, and an optional RFID-based dispatcher for fully autonomous, collision-protected multi-train operation.
 
 ## Prerequisites
 
 - Python 3.x
 - `bleak` library for Bluetooth Low Energy communication
 - `msgpack` for data serialization
+- `paho-mqtt` for the optional RFID dispatcher's MQTT connection
 - Linux system with Bluetooth support (tested on Raspberry Pi)
 - Root/sudo privileges for Bluetooth operations
 - FastAPI and uvicorn for the web service
 - Python virtual environment (recommended)
 - LEGO Technic Hubs (City Hub for trains, Technic Hub for switches)
 - LEGO Color Distance Sensor (for self-driving train functionality)
+- *Optional, for autonomous RFID dispatch:* a Mosquitto MQTT broker, plus a Raspberry Pi Pico 2 W + MFRC522 RFID reader per train and RFID tags at track block boundaries — see [pico/README.md](pico/README.md) and the "RFID Autonomous Dispatch" section below
 
 ## Installation
 
@@ -134,6 +136,8 @@ The web service runs on port 8000 and provides the following REST API endpoints:
 ### System Control
 - `POST /reset` - Reset Bluetooth connections
 
+> **Note:** The optional RFID dispatcher (see below) does not add any REST endpoints. It runs as a background task inside the same service and drives trains/switches through the same internal controllers the API uses — manual REST commands still work but bypass the dispatcher's block protection.
+
 ## Features
 
 ### Train Control
@@ -149,6 +153,15 @@ The web service runs on port 8000 and provides the following REST API endpoints:
 - Automatic detection of connected motors
 - Command verification with retry mechanism
 - Reliability statistics for each switch
+
+### RFID Autonomous Dispatch (Optional)
+- Raspberry Pi Pico 2 W + RFID reader on each train reports track position over MQTT
+- Block protection: a train is held at a block boundary until the block ahead is free
+- Automatic switch alignment before a train enters a block that requires it
+- Deadlock avoidance when two trains contend for the same block (closer train proceeds)
+- Watchdog failsafe stops every train if one misses an expected tag, auto-clearing once it reappears
+- Runs standalone with no hardware (`python -m dispatcher --mock`) for testing the routing logic
+- See [pico/README.md](pico/README.md) for firmware setup and wiring
 
 ### System Features
 - Real-time status monitoring of switch and train positions
@@ -177,10 +190,22 @@ lego-bluetooth-controller/
 │   ├── __init__.py
 │   ├── switch_controller.py        # Switch control logic
 │   └── train_controller.py         # Train control logic
+├── dispatcher/                     # Optional RFID-based autonomous dispatcher
+│   ├── track_model.py              # Track topology graph + train/block state
+│   ├── block_manager.py            # Block protection, switch locking, contention
+│   ├── mqtt_bridge.py              # MQTT bridge to Pico-based RFID readers
+│   ├── dispatcher.py               # Main orchestrator + watchdog failsafe
+│   ├── factory.py                  # Builds a Dispatcher from app settings
+│   └── __main__.py                 # `python -m dispatcher --mock` standalone runner
 ├── hubs/                           # Code that runs on LEGO hubs
 │   ├── switch_receiver_dcmotor.py  # DCMotor-based switch control
 │   ├── switch_receiver_motor.py    # Motor-based switch control
 │   └── train_receiver.py           # Train control with color sensing
+├── pico/                           # MicroPython firmware for the RFID reader
+│   ├── config.example.py           # Per-train config template (copy to config.py)
+│   ├── main.py                     # WiFi/MQTT/RFID polling loop
+│   ├── mfrc522.py                  # Vendored MFRC522 driver (MIT licensed)
+│   └── README.md                   # Wiring, flashing, and troubleshooting
 ├── servers/                        # Backend server components
 │   ├── __init__.py
 │   ├── bluetooth_scanner.py        # Enhanced BLE scanning
@@ -190,7 +215,7 @@ lego-bluetooth-controller/
 │   ├── __init__.py
 │   └── constants.py                # Shared constants
 └── webservice/                     # API layer
-    └── train_service.py            # FastAPI implementation
+    └── train_service.py            # FastAPI implementation (also starts the dispatcher)
 ```
 
 ### Server Components
@@ -203,6 +228,13 @@ lego-bluetooth-controller/
 - `train_receiver.py`: Runs on the LEGO City Hub to control trains with color sensing
 - `switch_receiver_motor.py`: Runs on LEGO Technic Hub to control switches using Motor
 - `switch_receiver_dcmotor.py`: Runs on LEGO Technic Hub to control switches using DCMotor
+
+### Dispatcher Components (Optional)
+- `TrackModel`: Directed graph of RFID tag positions, track blocks, and switch requirements
+- `BlockManager`: Grants/queues block entry, sets switches, resolves contention between trains
+- `MqttBridge`: Subscribes to RFID tag events from trains, bridges paho-mqtt's network thread to asyncio
+- `Dispatcher`: Orchestrates position tracking, block protection, and watchdog failsafe stops
+- `pico/main.py`: Runs on a Raspberry Pi Pico 2 W to poll an RFID reader and publish tag events over MQTT
 
 ### Communication
 - Bluetooth Low Energy (BLE) for wireless communication

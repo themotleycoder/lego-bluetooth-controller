@@ -38,6 +38,25 @@ REQUIRE_AUTH=false
 
 ⚠️ **WARNING:** Never disable authentication in production or on network-accessible services!
 
+## MQTT Security (Optional RFID Dispatcher)
+
+If you enable the RFID dispatcher (`DISPATCHER_ENABLED=true`), it connects to a Mosquitto MQTT broker to receive tag reads from trains and is a separate attack surface from the REST API.
+
+**Configuration:**
+```bash
+# In .env file
+MQTT_BROKER_HOST=localhost
+MQTT_BROKER_PORT=1883
+MQTT_USERNAME=your-broker-username   # omit/leave blank to disable MQTT auth
+MQTT_PASSWORD=your-broker-password
+```
+
+**Recommendations:**
+- Configure Mosquitto with username/password auth (`mosquitto_passwd`) rather than running it open, especially if the Pi is reachable beyond your local network
+- Bind Mosquitto to `localhost` or your local subnet only — there is no built-in TLS for the MQTT link (`mosquitto.conf`'s `listener`/`bind_address`, or a firewall rule)
+- Each train's Pico firmware (`pico/config.py`) must be configured with the same `MQTT_USERNAME`/`MQTT_PASSWORD` if broker auth is enabled — see [pico/README.md](pico/README.md)
+- A spoofed/malicious tag-read publish on `train/+/tag` could feed the dispatcher false position data; broker auth plus a trusted local network are the primary mitigations, since the dispatcher does not authenticate individual tag events beyond checking the UID is a known track tag
+
 ## CORS Configuration
 
 Cross-Origin Resource Sharing (CORS) is configured to restrict which origins can access the API.
@@ -232,6 +251,7 @@ Monitor health checks and alert on failures.
 ⚠️ **DoS attacks** - No rate limiting (use reverse proxy or firewall)
 ⚠️ **Physical device access** - Bluetooth is inherently local
 ⚠️ **Malicious Bluetooth devices** - Trust local BLE environment
+⚠️ **MQTT eavesdropping/spoofing** - No TLS on the MQTT link; a compromised or unauthenticated broker could feed the dispatcher false train positions (see MQTT Security above)
 
 ## Incident Response
 
@@ -269,6 +289,8 @@ Before deploying to production:
 - [ ] Health monitoring set up
 - [ ] .env file permissions set to 600
 - [ ] API keys not committed to version control
+- [ ] If using the RFID dispatcher: Mosquitto configured with username/password auth and bound to a trusted network only
+- [ ] Pico firmware `config.py` files (per train) are not committed to version control
 
 ## Contact
 

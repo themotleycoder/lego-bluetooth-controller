@@ -8,6 +8,7 @@ Complete guide for setting up the LEGO Train Controller as a systemd service tha
 - Project deployed to Raspberry Pi (see [RASPBERRY_PI_DEPLOY.md](RASPBERRY_PI_DEPLOY.md))
 - Python virtual environment set up with dependencies installed
 - `.env` file configured with your settings
+- If using the optional RFID dispatcher (`DISPATCHER_ENABLED=true`): Mosquitto installed and running *before* this service starts — see [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md#rfid-dispatcher-optional). The dispatcher runs in-process as part of this same service; it does not need its own systemd unit.
 
 ## Quick Setup (TL;DR)
 
@@ -358,6 +359,19 @@ sudo systemctl daemon-reload
 sudo systemctl restart lego-bluetooth-controller
 ```
 
+### RFID Dispatcher (Optional)
+
+If `DISPATCHER_ENABLED=true` in `.env`, the service will try to connect to Mosquitto on startup. Make the unit wait for it by adding `mosquitto.service` to `After=`/`Requires=`:
+
+```ini
+[Unit]
+Description=LEGO Train and Switch Controller Service
+After=network.target bluetooth.target mosquitto.service
+Requires=bluetooth.service mosquitto.service
+```
+
+Then `sudo systemctl daemon-reload && sudo systemctl restart lego-bluetooth-controller`. See [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md#rfid-dispatcher-optional) for broker setup and [pico/README.md](pico/README.md) for the per-train firmware.
+
 ### Custom Environment Variables
 
 Add environment variables in the service file under `[Service]`:
@@ -552,6 +566,7 @@ curl http://localhost:8000/health
 - **[RASPBERRY_PI_DEPLOY.md](RASPBERRY_PI_DEPLOY.md)** - Complete deployment guide
 - **[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)** - General deployment information
 - **[SECURITY.md](SECURITY.md)** - Security best practices
+- **[pico/README.md](pico/README.md)** - RFID dispatcher firmware setup (optional)
 
 ---
 

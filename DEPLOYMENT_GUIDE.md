@@ -6,6 +6,7 @@
 - [Configuration](#configuration)
 - [Running the Service](#running-the-service)
 - [Testing](#testing)
+- [RFID Dispatcher (Optional)](#rfid-dispatcher-optional)
 - [Production Deployment](#production-deployment)
 - [Troubleshooting](#troubleshooting)
 
@@ -262,6 +263,54 @@ http://localhost:8000/docs
 
 # Or ReDoc
 http://localhost:8000/redoc
+```
+
+## RFID Dispatcher (Optional)
+
+Enables fully autonomous, collision-protected train movement using RFID tags at track block boundaries. Skip this section if you're only using manual train/switch control.
+
+### 1. Install Mosquitto (MQTT Broker)
+```bash
+sudo apt-get install mosquitto mosquitto-clients -y
+
+# Optional but recommended: require broker auth
+sudo mosquitto_passwd -c /etc/mosquitto/passwd your-mqtt-username
+echo "password_file /etc/mosquitto/passwd" | sudo tee -a /etc/mosquitto/conf.d/local.conf
+echo "allow_anonymous false" | sudo tee -a /etc/mosquitto/conf.d/local.conf
+sudo systemctl restart mosquitto
+
+# Verify
+mosquitto_sub -t 'train/+/tag' -u your-mqtt-username -P your-mqtt-password
+```
+
+### 2. Configure the Dispatcher (.env)
+```bash
+DISPATCHER_ENABLED=true
+MQTT_BROKER_HOST=localhost
+MQTT_BROKER_PORT=1883
+MQTT_USERNAME=your-mqtt-username
+MQTT_PASSWORD=your-mqtt-password
+TRAIN_HUB_MAPPING=TRN-A:12,TRN-B:22
+```
+
+See `config.py` for the full list of `mqtt_*`/`dispatcher_*` settings (broker keepalive, topic templates, watchdog timeout, cruise power).
+
+### 3. Test the Dispatcher Logic Without Hardware
+```bash
+# Runs the routing/block-protection state machine with a scripted event
+# sequence -- no broker, BLE hardware, or physical track needed
+python -m dispatcher --mock --duration 10
+```
+
+### 4. Flash the Pico Firmware
+
+Each train needs a Raspberry Pi Pico 2 W + MFRC522 reader running the firmware in `pico/`, configured with matching `MQTT_BROKER_HOST`/`MQTT_USERNAME`/`MQTT_PASSWORD` and a unique `TRAIN_ID`. See **[pico/README.md](pico/README.md)** for wiring, flashing, and verification steps.
+
+### 5. Start the Service and Verify
+
+Restart the service as usual (see [Running the Service](#running-the-service)); the dispatcher starts automatically as a background task when `DISPATCHER_ENABLED=true`. Confirm tag events are flowing:
+```bash
+mosquitto_sub -t 'train/+/tag' -u your-mqtt-username -P your-mqtt-password
 ```
 
 ## Production Deployment

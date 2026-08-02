@@ -19,6 +19,7 @@ os.environ["API_KEYS"] = "test-api-key-12345"
 os.environ["ALLOWED_ORIGINS"] = "http://localhost:8080"
 os.environ["LOG_LEVEL"] = "DEBUG"
 os.environ["BLUETOOTH_RESET_ON_STARTUP"] = "false"
+os.environ["DISPATCHER_ENABLED"] = "false"
 
 
 @pytest.fixture(scope="session")

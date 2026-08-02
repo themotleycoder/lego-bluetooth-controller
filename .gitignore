@@ -129,6 +129,7 @@ celerybeat.pid
 
 # Environments
 .env
+pico/config.py
 .venv
 env/
 venv/
@@ -174,3 +175,6 @@ cython_debug/
 lego-bluetooth-controller.service
 lego-controller.service
 *-controller.service
+
+# macOS
+.DS_Store

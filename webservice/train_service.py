@@ -20,6 +20,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from config import get_settings
+from dispatcher.factory import build_dispatcher
 from middleware.auth import api_key_header, verify_api_key
 from servers.main import LegoController
 from utils.logging_config import setup_logging, get_logger
@@ -60,6 +61,13 @@ app.add_middleware(
 
 # Initialize controller
 controller = LegoController()
+
+# Initialize the RFID dispatcher (shares the controller's BLE controllers)
+dispatcher = (
+    build_dispatcher(controller.train_controller, controller.switch_controller)
+    if settings.dispatcher_enabled
+    else None
+)
 
 # Request counter for tracking
 request_counter = 0
@@ -117,6 +125,10 @@ async def startup_event():
         asyncio.create_task(controller.switch_controller.start_status_monitoring())
         logger.info("Background monitoring tasks started")
 
+        if dispatcher is not None:
+            asyncio.create_task(dispatcher.run())
+            logger.info("RFID dispatcher started")
+
     except Exception as e:
         logger.error(f"Failed to initialize controller: {e}", exc_info=True)
         raise
@@ -129,6 +141,8 @@ async def shutdown_event():
     try:
         controller.running = False
         await controller.train_controller.stop_status_monitoring()
+        if dispatcher is not None:
+            await dispatcher.stop()
         await asyncio.sleep(1)  # Give time for cleanup
         logger.info("Shutdown completed successfully")
     except Exception as e:

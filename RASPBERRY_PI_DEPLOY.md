@@ -139,6 +139,12 @@ Controller initialized successfully
 
 ---
 
+## 🛤️ RFID Autonomous Dispatch (Optional)
+
+If you want trains to run autonomously with collision protection instead of manual control only, you'll additionally need a Mosquitto MQTT broker on the Pi and a Raspberry Pi Pico 2 W + RFID reader per train. Full setup steps (installing Mosquitto, `.env` config, testing with `python -m dispatcher --mock`) are in **[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md#rfid-dispatcher-optional)**; firmware flashing/wiring is in **[pico/README.md](pico/README.md)**. Skip this section if manual control is all you need — `DISPATCHER_ENABLED` defaults to `false`, so nothing changes unless you opt in.
+
+---
+
 ## 📱 Flutter App Configuration
 
 ### Update Flutter .env File
@@ -449,5 +455,4 @@ Your authenticated LEGO Train Controller is now:
 For issues or questions, check:
 - [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) - Full deployment guide
 - [SECURITY.md](SECURITY.md) - Security best practices
-- [PHASE1_CHANGES.md](PHASE1_CHANGES.md) - Security implementation details
-- [PHASE2_CHANGES.md](PHASE2_CHANGES.md) - Testing framework details
+- [pico/README.md](pico/README.md) - RFID dispatcher firmware setup (optional)

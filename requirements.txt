@@ -13,6 +13,9 @@ python-dotenv>=1.0.0
 python-multipart>=0.0.6
 slowapi>=0.1.9  # Rate limiting
 
+# RFID Dispatcher
+paho-mqtt>=1.6.1,<2.0.0  # Pinned below 2.0 for the simpler on_message callback signature
+
 # Logging (optional, but recommended for production)
 # python-json-logger>=2.0.7  # Uncomment for better JSON logging
 

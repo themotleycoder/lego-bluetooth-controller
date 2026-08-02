@@ -6,7 +6,7 @@ All configuration can be overridden via environment variables or .env file.
 """
 
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -120,6 +120,65 @@ class Settings(BaseSettings):
         return [
             pos.strip() for pos in self.valid_switch_positions.split(",") if pos.strip()
         ]
+
+    # MQTT Configuration (RFID dispatcher)
+    mqtt_broker_host: str = Field(
+        default="localhost", description="MQTT broker hostname or IP address"
+    )
+    mqtt_broker_port: int = Field(default=1883, description="MQTT broker port")
+    mqtt_keepalive: int = Field(
+        default=60, description="MQTT connection keepalive interval in seconds"
+    )
+    mqtt_client_id: str = Field(
+        default="lego-dispatcher", description="MQTT client ID for the dispatcher"
+    )
+    mqtt_username: Optional[str] = Field(
+        default=None, description="MQTT broker username (omit to disable MQTT auth)"
+    )
+    mqtt_password: Optional[str] = Field(
+        default=None, description="MQTT broker password (omit to disable MQTT auth)"
+    )
+    mqtt_tag_topic_template: str = Field(
+        default="train/{train_id}/tag",
+        description="MQTT topic template trains publish RFID tag reads to",
+    )
+    mqtt_command_topic_template: str = Field(
+        default="train/{train_id}/command",
+        description="MQTT topic template the dispatcher publishes commands to",
+    )
+
+    # Dispatcher Configuration
+    dispatcher_enabled: bool = Field(
+        default=False,
+        description="Enable the RFID/MQTT dispatcher background task on startup",
+    )
+    dispatcher_watchdog_timeout: float = Field(
+        default=10.0,
+        description="Seconds a moving train may go without a tag read before failsafe triggers",
+    )
+    dispatcher_watchdog_check_interval: float = Field(
+        default=1.0,
+        description="How often the dispatcher watchdog checks train timeouts",
+    )
+    dispatcher_cruise_power: int = Field(
+        default=40, description="Default motor power the dispatcher resumes trains at"
+    )
+    train_hub_mapping: str = Field(
+        default="",
+        description="Comma-separated train_id:hub_id pairs, e.g. 'TRN-A:12,TRN-B:22'",
+    )
+
+    @property
+    def train_hub_mapping_dict(self) -> Dict[str, int]:
+        """Parse train_hub_mapping into a dict of train_id -> hub_id."""
+        mapping: Dict[str, int] = {}
+        for pair in self.train_hub_mapping.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            train_id, _, hub_id = pair.partition(":")
+            mapping[train_id.strip()] = int(hub_id.strip())
+        return mapping
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"

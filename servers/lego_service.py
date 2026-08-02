@@ -277,7 +277,8 @@ async def process_command(service: LegoService, device: BLEDevice, command: str)
             return
 
         if parts[0] == "help":
-            print("""
+            print(
+                """
 Available commands:
   forward <port> <duration> [power]  - Move motor forward (e.g., 'forward 0 2.0 50')
   backward <port> <duration> [power] - Move motor backward (e.g., 'backward 0 2.0 50')
@@ -287,7 +288,8 @@ Available commands:
   status                            - Show connection status
   quit                              - Exit the program
   help                              - Show this help message
-            """.strip())
+            """.strip()
+            )
             return
 
         if parts[0] == "quit":

@@ -1,0 +1,14 @@
+{
+  "executionEnvironments": [
+    {
+      "root": "hubs",
+      "reportMissingImports": "none",
+      "reportMissingModuleSource": "none"
+    },
+    {
+      "root": "pico",
+      "reportMissingImports": "none",
+      "reportMissingModuleSource": "none"
+    }
+  ]
+}
