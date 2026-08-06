@@ -9,15 +9,7 @@ from config import Settings
 from dispatcher.block_manager import BlockManager
 from dispatcher.dispatcher import Dispatcher
 from dispatcher.mqtt_bridge import TagEvent
-from dispatcher.track_model import (
-    SwitchDescriptor,
-    SwitchPosition,
-    SwitchRequirement,
-    TagNode,
-    TrackEdge,
-    TrackModel,
-    TrainDescriptor,
-)
+from dispatcher.track_model import TrackModel
 
 
 class FakeBridge:
@@ -48,27 +40,15 @@ class FakeBridge:
 
 def build_two_train_model() -> TrackModel:
     """
-    TRN-A and TRN-B both start at "A" and share the A->B bottleneck block
-    before diverging to C/D respectively -- a shared single-track segment
-    two trains contend for, exercising block protection end-to-end.
+    TRN-A and TRN-B both start needing the real A->H block (BLK_AH, requires
+    switch "A" STRAIGHT, sensor 4) -- a shared single-track segment two
+    trains contend for, exercising block protection end-to-end.
     """
-    tags = [TagNode("A"), TagNode("B"), TagNode("C"), TagNode("D")]
-    switches = [SwitchDescriptor("SW1", hub_id=1, switch_name="SWITCH_A")]
-    edges = [
-        TrackEdge("E_AB", "A", "B"),
-        TrackEdge(
-            "E_BC",
-            "B",
-            "C",
-            switch_requirements=[SwitchRequirement("SW1", SwitchPosition.STRAIGHT)],
-        ),
-        TrackEdge("E_BD", "B", "D"),
-    ]
-    trains = [
-        TrainDescriptor("TRN-A", hub_id=12, route=["A", "B", "C"]),
-        TrainDescriptor("TRN-B", hub_id=22, route=["A", "B", "D"]),
-    ]
-    return TrackModel(tags=tags, edges=edges, switches=switches, trains=trains)
+    model = TrackModel()
+    model.configure_switch_wiring("A", hub_id=1, port_name="SWITCH_A")
+    model.register_train("TRN-A", hub_id=12, route=["A", "H"])
+    model.register_train("TRN-B", hub_id=22, route=["A", "H"])
+    return model
 
 
 def build_settings(**overrides) -> Settings:
@@ -116,7 +96,10 @@ class TestTagEventHandling:
             switch_controller,
         ) = build_dispatcher()
 
-        await dispatcher._handle_tag_event(TagEvent("TRN-A", "A", 1.0))
+        # Tag value is arbitrary here -- nothing is pending yet, so it's
+        # ignored for position purposes, but the dispatcher still grants the
+        # train's first chain (A->H) unconditionally afterward.
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))
 
         train_controller.handle_command.assert_awaited_with(
             12, dispatcher._settings.dispatcher_cruise_power
@@ -131,12 +114,10 @@ class TestTagEventHandling:
             switch_controller,
         ) = build_dispatcher()
 
-        await dispatcher._handle_tag_event(TagEvent("TRN-A", "A", 1.0))
-        await dispatcher._handle_tag_event(TagEvent("TRN-A", "B", 2.0))
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))  # grants A->H
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "4", 2.0))  # confirms it
 
-        switch_controller.send_command_with_retry.assert_awaited_with(
-            1, "SWITCH_A", int(SwitchPosition.STRAIGHT)
-        )
+        switch_controller.send_command_with_retry.assert_awaited_with(1, "SWITCH_A", 0)
 
     async def test_second_train_is_stopped_when_shared_block_is_occupied(self):
         (
@@ -147,8 +128,8 @@ class TestTagEventHandling:
             switch_controller,
         ) = build_dispatcher()
 
-        await dispatcher._handle_tag_event(TagEvent("TRN-A", "A", 1.0))  # grants A->B
-        await dispatcher._handle_tag_event(TagEvent("TRN-B", "A", 1.0))  # denied
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))  # grants A->H
+        await dispatcher._handle_tag_event(TagEvent("TRN-B", "1", 1.0))  # denied
 
         train_controller.handle_command.assert_awaited_with(22, 0)
 
@@ -161,11 +142,13 @@ class TestTagEventHandling:
             switch_controller,
         ) = build_dispatcher()
 
-        await dispatcher._handle_tag_event(TagEvent("TRN-A", "A", 1.0))
-        await dispatcher._handle_tag_event(TagEvent("TRN-B", "A", 1.0))  # queued
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))
+        await dispatcher._handle_tag_event(TagEvent("TRN-B", "1", 1.0))  # queued
         train_controller.handle_command.reset_mock()
 
-        await dispatcher._handle_tag_event(TagEvent("TRN-A", "B", 2.0))  # releases E_AB
+        await dispatcher._handle_tag_event(
+            TagEvent("TRN-A", "4", 2.0)
+        )  # releases BLK_AH
 
         train_controller.handle_command.assert_any_await(
             22, dispatcher._settings.dispatcher_cruise_power
@@ -180,7 +163,7 @@ class TestTagEventHandling:
             switch_controller,
         ) = build_dispatcher()
 
-        await dispatcher._handle_tag_event(TagEvent("GHOST", "A", 1.0))
+        await dispatcher._handle_tag_event(TagEvent("GHOST", "1", 1.0))
 
         train_controller.handle_command.assert_not_awaited()
 
@@ -207,8 +190,8 @@ class TestWatchdog:
             train_controller,
             switch_controller,
         ) = build_dispatcher()
-        for train_id, train in model.trains.items():
-            model.record_tag_event(train_id, train.route[0], timestamp=time.time())
+        for train_id in model.trains:
+            model.mark_tag_seen(train_id, timestamp=time.time())
             model.mark_stopped(train_id, False)
 
         watchdog_task = asyncio.create_task(dispatcher._watchdog_loop())
@@ -238,8 +221,8 @@ class TestWatchdog:
             train_controller,
             switch_controller,
         ) = build_dispatcher()
-        for train_id, train in model.trains.items():
-            model.record_tag_event(train_id, train.route[0], timestamp=time.time())
+        for train_id in model.trains:
+            model.mark_tag_seen(train_id, timestamp=time.time())
             model.mark_stopped(train_id, False)
 
         watchdog_task = asyncio.create_task(dispatcher._watchdog_loop())
@@ -251,11 +234,7 @@ class TestWatchdog:
             assert stalled_train_id is not None
 
             train_controller.handle_command.reset_mock()
-            await dispatcher._handle_tag_event(
-                TagEvent(
-                    stalled_train_id, model.trains[stalled_train_id].route[0], 1000.0
-                )
-            )
+            await dispatcher._handle_tag_event(TagEvent(stalled_train_id, "1", 1000.0))
 
             assert dispatcher._emergency is False
             assert dispatcher._emergency_train_id is None
