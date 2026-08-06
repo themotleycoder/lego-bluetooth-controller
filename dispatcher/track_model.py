@@ -1,320 +1,651 @@
 """
-Track topology and live position/occupancy state for the RFID dispatcher.
+Track topology model for the LEGO train dispatcher.
 
-Models the track as a directed graph: nodes are RFID tag positions, edges are
-track segments between two tags. Positioning is tag-granularity only (no
-continuous odometry), so each train follows a fixed, pre-assigned cyclic route
-rather than being dynamically routed.
+Directed graph of the physical track layout. Switches are nodes,
+track segments are edges. RFID sensors sit on edges for position detection.
+
+Usage:
+    from track_model import TrackModel
+    model = TrackModel()
+    route = model.find_route("SW_A", "SW_J")
 """
 
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from enum import Enum, IntEnum
-from typing import Dict, List, Optional
-
-from utils.logging_config import get_logger
-
-logger = get_logger(__name__)
+from dataclasses import dataclass, field, replace
+from enum import Enum
+from typing import Optional
 
 
-class SwitchPosition(IntEnum):
-    """Physical switch position, matching SwitchController's numeric convention."""
-
-    STRAIGHT = 0
-    DIVERGING = 1
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
 
 
-class BlockState(Enum):
-    """Occupancy state of a track block (edge)."""
+class SwitchPort(Enum):
+    """Physical ports on a LEGO switch piece."""
 
-    FREE = "free"
-    OCCUPIED = "occupied"
+    TRUNK = "trunk"
+    STRAIGHT = "straight"
+    DIVERGE = "diverge"
 
 
-@dataclass(frozen=True)
-class TagNode:
-    """
-    An RFID tag position on the track.
+class SwitchType(Enum):
+    MOTORIZED = "motorized"  # dispatcher-controlled via BLE
+    MANUAL = "manual"  # hand-set, fixed position
 
-    `tag_id` is the logical name used throughout the topology (routes,
-    edges). `uid` is the physical RFID tag's scanned UID hex string; when
-    omitted, `tag_id` itself is treated as the UID (handy for the sample
-    topology and tests, where "T1" can be published directly as the UID).
-    """
 
-    tag_id: str
-    uid: Optional[str] = None
-    label: Optional[str] = None
+class Direction(Enum):
+    """Which way a train is moving through a bidirectional edge."""
+
+    FORWARD = "forward"
+    REVERSE = "reverse"
+
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class SwitchRequirement:
-    """A switch position an edge requires in order to be traversable."""
+class Switch:
+    id: str
+    switch_type: SwitchType
+    # Current state: True = diverge, False = straight (trunk always connected)
+    # For manual switches the dispatcher reads but doesn't write this.
 
-    switch_id: str
-    required_position: SwitchPosition
+    # BLE wiring, populated at runtime from config (see TrackModel.configure_switch_wiring) --
+    # unset for manual switches, which the dispatcher never actuates.
+    hub_id: Optional[int] = None
+    port_name: Optional[
+        str
+    ] = None  # e.g. "SWITCH_A", matches SwitchController's convention
 
-
-@dataclass(frozen=True)
-class TrackEdge:
-    """
-    A directed track segment between two RFID tags.
-
-    Directed because a facing switch may require a different position
-    depending on the direction of travel; a bidirectional segment is
-    represented as two TrackEdge instances.
-    """
-
-    edge_id: str
-    from_tag: str
-    to_tag: str
-    length_m: Optional[float] = None
-    switch_requirements: List[SwitchRequirement] = field(default_factory=list)
+    def __repr__(self) -> str:
+        return f"SW_{self.id}({self.switch_type.value})"
 
 
 @dataclass(frozen=True)
-class SwitchDescriptor:
-    """Maps an abstract topology switch to its physical hub/port."""
+class Sensor:
+    """An RFID tag embedded under the track."""
 
-    switch_id: str
-    hub_id: int
-    switch_name: str  # e.g. "SWITCH_A".."SWITCH_D"
+    id: int
+    tag_uid: Optional[str] = None  # populated at runtime from config
+    description: str = ""
+
+    def __repr__(self) -> str:
+        return f"TAG_{self.id}"
+
+
+@dataclass(frozen=True)
+class Edge:
+    """
+    A directed track segment between two switch ports.
+
+    Trains can traverse in both directions; the 'forward' direction
+    is from_switch:from_port -> to_switch:to_port. A reverse edge
+    is generated automatically by TrackModel.
+    """
+
+    id: str
+    from_switch: str  # switch id
+    from_port: SwitchPort
+    to_switch: str  # switch id
+    to_port: SwitchPort
+    sensors: list[int] = field(default_factory=list)  # sensor ids in order
+    block: str = ""  # block id for occupancy
+
+    def __repr__(self) -> str:
+        sensors_str = (
+            f" [{', '.join(f'T{s}' for s in self.sensors)}]" if self.sensors else ""
+        )
+        return f"{self.from_switch}.{self.from_port.value} -> {self.to_switch}.{self.to_port.value}{sensors_str}"
 
 
 @dataclass
-class TrainDescriptor:
-    """A train's identity and its fixed, pre-assigned cyclic route."""
+class Block:
+    """
+    A track section protected by occupancy locking.
+    Only one train may hold a block at a time.
+    """
 
-    train_id: str
+    id: str
+    edge_ids: list[str]  # edges that share this block
+    description: str = ""
+    occupied_by: Optional[str] = None  # train_id or None
+
+
+@dataclass
+class Train:
+    """A train's identity and its fixed, pre-assigned cyclic route through switches."""
+
+    id: str
     hub_id: int
-    route: List[str]  # cyclic list of tag_ids
+    route: list[str]  # cyclic list of switch ids
 
 
 @dataclass
 class TagEventResult:
-    """Outcome of recording a single RFID tag read."""
+    """Outcome of recording a single RFID sensor read."""
 
     train_id: str
-    previous_tag: Optional[str]
-    current_tag: str
-    edge_completed: Optional[TrackEdge]
+    previous_position: Optional[str]
+    current_position: Optional[str]
+    edges_completed: list[Edge]
+
+
+# ---------------------------------------------------------------------------
+# Track model
+# ---------------------------------------------------------------------------
 
 
 class TrackModel:
-    """Directed-graph model of the track plus live train/switch/block state."""
+    """
+    Full graph of the LEGO train layout.
 
-    def __init__(
-        self,
-        tags: List[TagNode],
-        edges: List[TrackEdge],
-        switches: List[SwitchDescriptor],
-        trains: List[TrainDescriptor],
-    ) -> None:
-        """Build the graph and initialize all blocks to FREE."""
-        self.tags: Dict[str, TagNode] = {tag.tag_id: tag for tag in tags}
-        self.edges: Dict[str, TrackEdge] = {edge.edge_id: edge for edge in edges}
-        self.switches: Dict[str, SwitchDescriptor] = {
-            switch.switch_id: switch for switch in switches
-        }
-        self.trains: Dict[str, TrainDescriptor] = {
-            train.train_id: train for train in trains
-        }
+    Nodes = switches (10 total: 7 motorized, 3 manual)
+    Edges = track segments between switch ports
+    Sensors = 8 RFID tags on edges
+    Blocks = 15 occupancy zones
+    """
 
-        self._edges_from: Dict[str, List[TrackEdge]] = {}
-        for edge in edges:
-            self._edges_from.setdefault(edge.from_tag, []).append(edge)
+    def __init__(self) -> None:
+        self.switches: dict[str, Switch] = {}
+        self.sensors: dict[int, Sensor] = {}
+        self.edges: dict[str, Edge] = {}
+        self.blocks: dict[str, Block] = {}
 
-        self._tag_id_by_uid: Dict[str, str] = {
-            (tag.uid or tag.tag_id): tag.tag_id for tag in tags
-        }
+        # adjacency: switch_id -> list of edge_ids leaving that switch
+        self._adj: dict[str, list[str]] = {}
 
-        self.train_position: Dict[str, str] = {}
-        self.train_last_update: Dict[str, float] = {}
-        self.train_stopped: Dict[str, bool] = {}
-        self.block_state: Dict[str, BlockState] = {
-            edge.edge_id: BlockState.FREE for edge in edges
-        }
-        self.switch_positions: Dict[str, SwitchPosition] = {}
+        # Runtime state: train registry + live position/movement tracking.
+        # Unlike switches/sensors/edges/blocks (fixed topology), this is
+        # populated at runtime via register_train() from config.
+        self.trains: dict[str, Train] = {}
+        self.train_position: dict[str, str] = {}
+        self._train_route_index: dict[str, int] = {}
+        self._train_stopped: dict[str, bool] = {}
+        self._train_last_tag_time: dict[str, float] = {}
+        # Edges granted to a train but not yet confirmed cleared by a tag read,
+        # in route order. See TrackModel.next_block_chain_for_train.
+        self._pending_edges: dict[str, list[Edge]] = {}
 
-    def edges_from(self, tag_id: str) -> List[TrackEdge]:
-        """Return all edges departing the given tag."""
-        return list(self._edges_from.get(tag_id, []))
+        self._build()
 
-    def tag_id_for_uid(self, uid: str) -> Optional[str]:
-        """Resolve a physical RFID tag UID to its logical tag_id, if known."""
-        return self._tag_id_by_uid.get(uid)
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
 
-    def record_tag_event(
-        self, train_id: str, tag_id: str, timestamp: float
-    ) -> TagEventResult:
-        """
-        Update a train's position from a tag read.
+    def _build(self) -> None:
+        self._build_switches()
+        self._build_sensors()
+        self._build_edges()
+        self._build_blocks()
+        self._build_adjacency()
 
-        Unknown train/tag IDs are logged and ignored rather than raised, since
-        a misread tag must not crash the dispatcher.
-        """
-        if train_id not in self.trains:
-            logger.warning(f"Tag event from unregistered train: {train_id}")
-            return TagEventResult(train_id, None, tag_id, None)
-        if tag_id not in self.tags:
-            logger.warning(f"Unknown tag_id {tag_id} reported by train {train_id}")
-            return TagEventResult(
-                train_id, self.train_position.get(train_id), tag_id, None
-            )
+    def _build_switches(self) -> None:
+        motorized = ["A", "B", "C", "F", "H", "I", "J"]
+        manual = ["D", "E", "G"]
+        for sid in motorized:
+            self.switches[sid] = Switch(id=sid, switch_type=SwitchType.MOTORIZED)
+        for sid in manual:
+            self.switches[sid] = Switch(id=sid, switch_type=SwitchType.MANUAL)
 
-        previous_tag = self.train_position.get(train_id)
-        edge_completed: Optional[TrackEdge] = None
-        if previous_tag is not None:
-            for edge in self.edges_from(previous_tag):
-                if edge.to_tag == tag_id:
-                    edge_completed = edge
-                    break
+    def _build_sensors(self) -> None:
+        defs = [
+            (1, "Right upper, B-J segment"),
+            (2, "Outer top left, E(div)-B(str) outer loop"),
+            (3, "Outer bottom right, J(str)-I(str) turnaround"),
+            (4, "Middle row, A(str)-H(trunk) segment"),
+            (5, "Outer bottom left, E(div)-B(str) outer loop"),
+            (6, "Inner bottom left, D(trunk)-C(trunk) turnaround"),
+            (7, "Right diagonal, J(div)-I(div) shortcut"),
+            (8, "Upper middle, A(div)-B(div) crossover"),
+        ]
+        for sid, desc in defs:
+            self.sensors[sid] = Sensor(id=sid, description=desc)
 
-        self.train_position[train_id] = tag_id
-        self.train_last_update[train_id] = timestamp
+    def _build_edges(self) -> None:
+        E = Edge
+        P = SwitchPort
+        edges = [
+            # ---- Inner loop ----
+            E("CA", "C", P.STRAIGHT, "A", P.TRUNK, [], "BLK_CA"),
+            E("AH", "A", P.STRAIGHT, "H", P.TRUNK, [4], "BLK_AH"),
+            E("HF", "H", P.STRAIGHT, "F", P.STRAIGHT, [], "BLK_HF"),
+            E("FE", "F", P.TRUNK, "E", P.TRUNK, [], "BLK_FE"),
+            E("ED", "E", P.STRAIGHT, "D", P.STRAIGHT, [], "BLK_ED"),
+            E("DC", "D", P.TRUNK, "C", P.TRUNK, [6], "BLK_DC"),
+            # ---- Outer loop ----
+            E("BJ", "B", P.TRUNK, "J", P.TRUNK, [1], "BLK_BJ"),
+            E("JI_S", "J", P.STRAIGHT, "I", P.STRAIGHT, [3], "BLK_JI_S"),
+            E("IF", "I", P.TRUNK, "F", P.DIVERGE, [], "BLK_IF"),
+            # F-E shared with inner (edge FE above)
+            E("EB", "E", P.DIVERGE, "B", P.STRAIGHT, [5, 2], "BLK_EB"),
+            # ---- Crossovers ----
+            E("AB", "A", P.DIVERGE, "B", P.DIVERGE, [8], "BLK_AB"),
+            E("CG", "C", P.DIVERGE, "G", P.DIVERGE, [], "BLK_CG"),
+            E("DG", "D", P.DIVERGE, "G", P.STRAIGHT, [], "BLK_DG"),
+            E("GH", "G", P.TRUNK, "H", P.DIVERGE, [], "BLK_GH"),
+            E("JI_D", "J", P.DIVERGE, "I", P.DIVERGE, [7], "BLK_JI_D"),
+        ]
+        for e in edges:
+            self.edges[e.id] = e
 
-        return TagEventResult(train_id, previous_tag, tag_id, edge_completed)
+    def _build_blocks(self) -> None:
+        blk_defs = [
+            ("BLK_CA", ["CA"], "Middle row left: C(str)-A(trunk)"),
+            (
+                "BLK_AH",
+                ["AH"],
+                "Middle row right + inner-right turn: A(str)-TAG_4-H(trunk)",
+            ),
+            ("BLK_HF", ["HF"], "Bottom inner right: H(str)-F(str)"),
+            (
+                "BLK_FE",
+                ["FE"],
+                "Bottom inner middle (shared inner/outer): F(trunk)-E(trunk)",
+            ),
+            ("BLK_ED", ["ED"], "Bottom inner left: E(str)-D(str)"),
+            ("BLK_DC", ["DC"], "Inner-left turnaround: D(trunk)-TAG_6-C(trunk)"),
+            ("BLK_BJ", ["BJ"], "Right upper: B(trunk)-TAG_1-J(trunk)"),
+            ("BLK_JI_S", ["JI_S"], "Outer right turnaround: J(str)-TAG_3-I(str)"),
+            ("BLK_IF", ["IF"], "Outer bottom right: I(trunk)-F(div)"),
+            ("BLK_EB", ["EB"], "Outer left + turnaround: E(div)-TAG_5-TAG_2-B(str)"),
+            ("BLK_AB", ["AB"], "Upper shortcut: A(div)-TAG_8-B(div)"),
+            ("BLK_CG", ["CG"], "Diagonal crossover: C(div)-G(div)"),
+            ("BLK_DG", ["DG"], "Cross track left: D(div)-G(str)"),
+            ("BLK_GH", ["GH"], "Cross track right: G(trunk)-H(div)"),
+            ("BLK_JI_D", ["JI_D"], "Diagonal shortcut: J(div)-TAG_7-I(div)"),
+        ]
+        for bid, eids, desc in blk_defs:
+            self.blocks[bid] = Block(id=bid, edge_ids=eids, description=desc)
 
-    def next_edge_for_train(self, train_id: str) -> Optional[TrackEdge]:
-        """Return the edge a train should take next along its fixed route."""
-        train = self.trains.get(train_id)
-        if train is None or not train.route:
-            return None
+    def _build_adjacency(self) -> None:
+        """Build forward + reverse adjacency from edges."""
+        for sid in self.switches:
+            self._adj[sid] = []
+        for eid, edge in self.edges.items():
+            self._adj[edge.from_switch].append(eid)
+            # Reverse traversal is also valid (bidirectional track)
+            self._adj[edge.to_switch].append(eid)
 
-        current_tag = self.train_position.get(train_id, train.route[0])
-        if current_tag not in train.route:
-            logger.warning(
-                f"Train {train_id} at tag {current_tag} is off its configured route"
-            )
-            return None
+    # ------------------------------------------------------------------
+    # Queries
+    # ------------------------------------------------------------------
 
-        idx = train.route.index(current_tag)
-        next_tag = train.route[(idx + 1) % len(train.route)]
+    def edges_from(
+        self, switch_id: str, port: Optional[SwitchPort] = None
+    ) -> list[Edge]:
+        """Edges leaving a switch, optionally filtered by port."""
+        result = []
+        for eid in self._adj.get(switch_id, []):
+            e = self.edges[eid]
+            if e.from_switch == switch_id:
+                if port is None or e.from_port == port:
+                    result.append(e)
+            elif e.to_switch == switch_id:
+                # reverse direction: the "from_port" in reverse is to_port
+                if port is None or e.to_port == port:
+                    result.append(e)
+        return result
 
-        for edge in self.edges_from(current_tag):
-            if edge.to_tag == next_tag:
-                return edge
+    def edge_between(self, sw_a: str, sw_b: str) -> list[Edge]:
+        """All edges directly connecting two switches (either direction)."""
+        result = []
+        for eid, e in self.edges.items():
+            if (e.from_switch == sw_a and e.to_switch == sw_b) or (
+                e.from_switch == sw_b and e.to_switch == sw_a
+            ):
+                result.append(e)
+        return result
 
-        logger.warning(
-            f"No edge found from {current_tag} to {next_tag} for train {train_id}"
-        )
+    def sensor_on_edge(self, sensor_id: int) -> Optional[Edge]:
+        """Find which edge a sensor sits on."""
+        for e in self.edges.values():
+            if sensor_id in e.sensors:
+                return e
         return None
 
-    def get_block_state(self, edge_id: str) -> BlockState:
-        """Return the current occupancy state of a block (edge)."""
-        return self.block_state.get(edge_id, BlockState.FREE)
+    def switch_required_position(
+        self, switch_id: str, port: SwitchPort
+    ) -> Optional[bool]:
+        """
+        What position must a switch be in to route through the given port?
 
-    def set_block_state(self, edge_id: str, state: BlockState) -> None:
-        """Set the occupancy state of a block (edge)."""
-        self.block_state[edge_id] = state
+        Returns:
+            None  - trunk is always connected regardless of position
+            False - switch must be set to STRAIGHT
+            True  - switch must be set to DIVERGE
+        """
+        if port == SwitchPort.TRUNK:
+            return None  # trunk is common to both positions
+        elif port == SwitchPort.STRAIGHT:
+            return False
+        else:
+            return True
 
-    def mark_stopped(self, train_id: str, stopped: bool) -> None:
-        """Mark whether a train is intentionally stopped (vs. moving)."""
-        self.train_stopped[train_id] = stopped
+    def neighbors(self, switch_id: str) -> set[str]:
+        """All switches directly reachable from this one."""
+        result = set()
+        for eid in self._adj.get(switch_id, []):
+            e = self.edges[eid]
+            if e.from_switch == switch_id:
+                result.add(e.to_switch)
+            else:
+                result.add(e.from_switch)
+        return result
 
-    def is_moving(self, train_id: str) -> bool:
-        """Whether a train should currently be advancing (used by the watchdog)."""
-        return train_id in self.train_position and not self.train_stopped.get(
-            train_id, True
-        )
+    def find_route(
+        self,
+        from_switch: str,
+        to_switch: str,
+    ) -> Optional[list[Edge]]:
+        """
+        BFS shortest path (fewest edges) between two switches.
+
+        Returns a list of edges forming the route, or None if unreachable.
+        The route ignores current switch positions and block occupancy;
+        the dispatcher is responsible for setting switches and acquiring
+        blocks before moving a train.
+        """
+        if from_switch == to_switch:
+            return []
+        if from_switch not in self.switches or to_switch not in self.switches:
+            return None
+
+        from collections import deque
+
+        queue: deque[tuple[str, list[Edge]]] = deque([(from_switch, [])])
+        visited: set[str] = {from_switch}
+
+        while queue:
+            current, path = queue.popleft()
+            for eid in self._adj.get(current, []):
+                edge = self.edges[eid]
+                if edge.from_switch == current:
+                    next_sw = edge.to_switch
+                else:
+                    next_sw = edge.from_switch
+
+                if next_sw in visited:
+                    continue
+                visited.add(next_sw)
+                new_path = path + [edge]
+                if next_sw == to_switch:
+                    return new_path
+                queue.append((next_sw, new_path))
+
+        return None
+
+    def route_switch_settings(self, route: list[Edge]) -> list[tuple[str, bool]]:
+        """
+        Given a route (list of edges), return the switch settings needed.
+
+        Returns list of (switch_id, diverge: bool) for motorized switches
+        that need to be set. Manual switches are included but flagged
+        via switch_type so the dispatcher can warn if misaligned.
+        """
+        settings: list[tuple[str, bool]] = []
+        for i, edge in enumerate(route):
+            # Entry switch: which port are we leaving from?
+            pos = self.switch_required_position(edge.from_switch, edge.from_port)
+            if pos is not None:
+                settings.append((edge.from_switch, pos))
+
+            # Exit switch: which port are we arriving at?
+            pos = self.switch_required_position(edge.to_switch, edge.to_port)
+            if pos is not None:
+                settings.append((edge.to_switch, pos))
+
+        # Deduplicate (a switch may appear in consecutive edges)
+        seen: set[str] = set()
+        unique: list[tuple[str, bool]] = []
+        for sw_id, diverge in settings:
+            if sw_id not in seen:
+                seen.add(sw_id)
+                unique.append((sw_id, diverge))
+        return unique
+
+    def route_blocks(self, route: list[Edge]) -> list[str]:
+        """Block IDs that must be acquired for a route, in order."""
+        blocks: list[str] = []
+        for edge in route:
+            if edge.block and (not blocks or blocks[-1] != edge.block):
+                blocks.append(edge.block)
+        return blocks
+
+    def route_sensors(self, route: list[Edge]) -> list[int]:
+        """Sensor IDs a train will encounter along a route, in order."""
+        sensors: list[int] = []
+        for edge in route:
+            sensors.extend(edge.sensors)
+        return sensors
+
+    # ------------------------------------------------------------------
+    # Runtime configuration (wiring populated from config, not hardcoded)
+    # ------------------------------------------------------------------
+
+    def configure_switch_wiring(
+        self, switch_id: str, hub_id: int, port_name: str
+    ) -> None:
+        """Attach BLE addressing to a motorized switch (from dispatcher config)."""
+        switch = self.switches.get(switch_id)
+        if switch is None:
+            raise KeyError(f"Unknown switch id: {switch_id}")
+        self.switches[switch_id] = replace(switch, hub_id=hub_id, port_name=port_name)
+
+    def configure_sensor_uid(self, sensor_id: int, uid: str) -> None:
+        """Attach a physical RFID UID to a sensor (from dispatcher config)."""
+        sensor = self.sensors.get(sensor_id)
+        if sensor is None:
+            raise KeyError(f"Unknown sensor id: {sensor_id}")
+        self.sensors[sensor_id] = replace(sensor, tag_uid=uid)
+
+    def sensor_id_for_uid(self, uid: str) -> Optional[int]:
+        """
+        Map a physical RFID UID to a logical sensor id.
+
+        Falls back to treating the sensor id itself (as a string) as the UID
+        when no explicit tag_uid has been configured -- handy for tests and
+        mock runs that don't need real hardware UIDs.
+        """
+        for sid, sensor in self.sensors.items():
+            if sensor.tag_uid is not None:
+                if sensor.tag_uid == uid:
+                    return sid
+            elif str(sid) == uid:
+                return sid
+        return None
+
+    # ------------------------------------------------------------------
+    # Train registry and live position/movement tracking
+    # ------------------------------------------------------------------
+
+    def register_train(self, train_id: str, hub_id: int, route: list[str]) -> None:
+        """Register a train with its fixed, pre-assigned cyclic route of switch ids."""
+        if not route:
+            raise ValueError(f"Train {train_id} needs a non-empty route")
+        for switch_id in route:
+            if switch_id not in self.switches:
+                raise ValueError(
+                    f"Train {train_id} route references unknown switch {switch_id}"
+                )
+        self.trains[train_id] = Train(id=train_id, hub_id=hub_id, route=list(route))
+        self.train_position[train_id] = route[0]
+        self._train_route_index[train_id] = 0
+        self._pending_edges[train_id] = []
+        self._train_stopped[train_id] = True
+
+    def mark_tag_seen(self, train_id: str, timestamp: float) -> None:
+        """Record that a train reported a tag at `timestamp`, for watchdog timing."""
+        self._train_last_tag_time[train_id] = timestamp
 
     def seconds_since_last_tag(
         self, train_id: str, now: Optional[float] = None
     ) -> float:
-        """Seconds elapsed since the train's last recorded tag read."""
-        now = now if now is not None else time.time()
-        last = self.train_last_update.get(train_id)
+        """Seconds since a train's last recorded tag; 0 if it's never reported one."""
+        last = self._train_last_tag_time.get(train_id)
         if last is None:
             return 0.0
-        return now - last
+        return (now if now is not None else time.time()) - last
+
+    def mark_stopped(self, train_id: str, stopped: bool) -> None:
+        """Record whether a train is intentionally stopped (vs. cruising)."""
+        self._train_stopped[train_id] = stopped
+
+    def is_moving(self, train_id: str) -> bool:
+        """True once a train has been explicitly marked as not stopped."""
+        return not self._train_stopped.get(train_id, True)
+
+    def hops_to_switch(self, train_id: str, target_switch: str) -> int:
+        """Route-hops from a train's current position to target_switch (for contention)."""
+        train = self.trains.get(train_id)
+        if train is None or not train.route:
+            return 0
+        route_len = len(train.route)
+        idx = self._train_route_index.get(train_id, 0)
+        for offset in range(route_len):
+            if train.route[(idx + offset) % route_len] == target_switch:
+                return offset
+        return route_len
+
+    def next_block_chain_for_train(self, train_id: str) -> Optional[list[Edge]]:
+        """
+        The next chain of edges a train should be granted, in route order.
+
+        Most blocks carry no sensor of their own, so a single tag read can't
+        confirm each one individually: the chain extends through consecutive
+        sensorless edges and stops after the first edge that does carry a
+        sensor (inclusive), since that's the next point positioning can be
+        confirmed. The whole chain is granted/released together
+        (see BlockManager) -- all or nothing, like switch-setting already is.
+        """
+        train = self.trains.get(train_id)
+        if train is None or not train.route:
+            return None
+        route_len = len(train.route)
+        idx = self._train_route_index.get(train_id, 0)
+        chain: list[Edge] = []
+        for step in range(route_len):
+            current_switch = train.route[(idx + step) % route_len]
+            next_switch = train.route[(idx + step + 1) % route_len]
+            candidates = self.edge_between(current_switch, next_switch)
+            if not candidates:
+                break
+            edge = candidates[0]
+            chain.append(edge)
+            if edge.sensors:
+                break
+        return chain or None
+
+    def grant_pending_chain(self, train_id: str, chain: list[Edge]) -> None:
+        """Mark a chain of edges as granted-but-not-yet-confirmed for a train."""
+        self._pending_edges[train_id] = list(chain)
+
+    def record_tag_event(
+        self, train_id: str, sensor_id: int, timestamp: float
+    ) -> TagEventResult:
+        """
+        Record a sensor read for a train and confirm any pending edges it clears.
+
+        A sensor read only confirms edges up to and including the edge it
+        sits on; since chains are built to end at the first sensored edge,
+        that's normally the entire pending chain. Reads for a sensor whose
+        edge isn't currently pending for this train (unregistered train,
+        stray/foreign read) are ignored -- no position update, no completion.
+        """
+        self.mark_tag_seen(train_id, timestamp)
+        previous_position = self.train_position.get(train_id)
+        train = self.trains.get(train_id)
+        if train is None:
+            return TagEventResult(train_id, previous_position, previous_position, [])
+
+        edge = self.sensor_on_edge(sensor_id)
+        pending = self._pending_edges.get(train_id, [])
+        if edge is None or edge not in pending:
+            return TagEventResult(train_id, previous_position, previous_position, [])
+
+        i = pending.index(edge)
+        completed = pending[: i + 1]
+        self._pending_edges[train_id] = pending[i + 1 :]
+        self._train_route_index[train_id] = self._train_route_index.get(
+            train_id, 0
+        ) + len(completed)
+        new_position = train.route[self._train_route_index[train_id] % len(train.route)]
+        self.train_position[train_id] = new_position
+        return TagEventResult(train_id, previous_position, new_position, completed)
+
+    # ------------------------------------------------------------------
+    # Block occupancy
+    # ------------------------------------------------------------------
+
+    def is_block_free(self, block_id: str) -> bool:
+        block = self.blocks.get(block_id)
+        return block is None or block.occupied_by is None
+
+    def occupy_block(self, block_id: str, train_id: str) -> None:
+        block = self.blocks.get(block_id)
+        if block is not None:
+            block.occupied_by = train_id
+
+    def free_block(self, block_id: str) -> None:
+        block = self.blocks.get(block_id)
+        if block is not None:
+            block.occupied_by = None
+
+    # ------------------------------------------------------------------
+    # Debug / display
+    # ------------------------------------------------------------------
+
+    def summary(self) -> str:
+        lines = [
+            f"TrackModel: {len(self.switches)} switches, "
+            f"{len(self.edges)} edges, "
+            f"{len(self.sensors)} sensors, "
+            f"{len(self.blocks)} blocks",
+            "",
+            "Switches:",
+        ]
+        for s in self.switches.values():
+            lines.append(f"  {s}")
+        lines.append("")
+        lines.append("Edges:")
+        for e in self.edges.values():
+            lines.append(f"  {e.id}: {e}")
+        lines.append("")
+        lines.append("Blocks:")
+        for b in self.blocks.values():
+            lines.append(f"  {b.id}: {b.description}")
+        return "\n".join(lines)
 
 
-def build_sample_topology() -> TrackModel:
-    """
-    Build the sample topology matching the reference layout: 14 tags, 7
-    switches, an inner loop and an outer loop sharing one junction.
+# ---------------------------------------------------------------------------
+# Quick self-test
+# ---------------------------------------------------------------------------
 
-    Outer loop: T1..T7 (7 tags). Inner loop: T8..T14 (7 tags). Switches SW1
-    (hub 1, SWITCH_A) and SW5 (hub 2, SWITCH_A) sit at the shared junction:
-    STRAIGHT keeps a train on its own loop, DIVERGING crosses it to the other
-    loop via the T1<->T8 crossover edges. Two Technic Hubs are used for
-    switches since each hub only exposes ports A-D (4 switches per hub).
-    """
-    tags = [TagNode(f"T{i}") for i in range(1, 15)]
+if __name__ == "__main__":
+    model = TrackModel()
+    print(model.summary())
+    print()
 
-    switches = [
-        SwitchDescriptor("SW1", hub_id=1, switch_name="SWITCH_A"),
-        SwitchDescriptor("SW2", hub_id=1, switch_name="SWITCH_B"),
-        SwitchDescriptor("SW3", hub_id=1, switch_name="SWITCH_C"),
-        SwitchDescriptor("SW4", hub_id=1, switch_name="SWITCH_D"),
-        SwitchDescriptor("SW5", hub_id=2, switch_name="SWITCH_A"),
-        SwitchDescriptor("SW6", hub_id=2, switch_name="SWITCH_B"),
-        SwitchDescriptor("SW7", hub_id=2, switch_name="SWITCH_C"),
-    ]
+    # Example: route from A to J
+    route = model.find_route("A", "J")
+    if route:
+        print(f"Route A → J ({len(route)} edges):")
+        for e in route:
+            print(f"  {e}")
+        print(f"Switch settings: {model.route_switch_settings(route)}")
+        print(f"Blocks to acquire: {model.route_blocks(route)}")
+        print(f"Sensors on route: {model.route_sensors(route)}")
 
-    def req(switch_id: str, position: SwitchPosition) -> List[SwitchRequirement]:
-        return [SwitchRequirement(switch_id, position)]
-
-    outer_tags = [f"T{i}" for i in range(1, 8)]
-    inner_tags = [f"T{i}" for i in range(8, 15)]
-
-    edges: List[TrackEdge] = []
-
-    # Outer loop, cyclic T1 -> T2 -> ... -> T7 -> T1.
-    outer_switch_map = {"T1": "SW1", "T3": "SW2", "T5": "SW3", "T7": "SW4"}
-    for i, from_tag in enumerate(outer_tags):
-        to_tag = outer_tags[(i + 1) % len(outer_tags)]
-        switch_id = outer_switch_map.get(from_tag)
-        edges.append(
-            TrackEdge(
-                edge_id=f"E_{from_tag}_{to_tag}",
-                from_tag=from_tag,
-                to_tag=to_tag,
-                switch_requirements=(
-                    req(switch_id, SwitchPosition.STRAIGHT) if switch_id else []
-                ),
-            )
-        )
-
-    # Inner loop, cyclic T8 -> T9 -> ... -> T14 -> T8.
-    inner_switch_map = {"T8": "SW5", "T10": "SW6", "T12": "SW7"}
-    for i, from_tag in enumerate(inner_tags):
-        to_tag = inner_tags[(i + 1) % len(inner_tags)]
-        switch_id = inner_switch_map.get(from_tag)
-        edges.append(
-            TrackEdge(
-                edge_id=f"E_{from_tag}_{to_tag}",
-                from_tag=from_tag,
-                to_tag=to_tag,
-                switch_requirements=(
-                    req(switch_id, SwitchPosition.STRAIGHT) if switch_id else []
-                ),
-            )
-        )
-
-    # Shared junction crossover between the two loops.
-    edges.append(
-        TrackEdge(
-            edge_id="E_T1_T8_crossover",
-            from_tag="T1",
-            to_tag="T8",
-            switch_requirements=req("SW1", SwitchPosition.DIVERGING),
-        )
-    )
-    edges.append(
-        TrackEdge(
-            edge_id="E_T8_T1_crossover",
-            from_tag="T8",
-            to_tag="T1",
-            switch_requirements=req("SW5", SwitchPosition.DIVERGING),
-        )
-    )
-
-    trains = [
-        TrainDescriptor(train_id="TRN-A", hub_id=12, route=inner_tags),
-        TrainDescriptor(train_id="TRN-B", hub_id=22, route=outer_tags),
-    ]
-
-    return TrackModel(tags=tags, edges=edges, switches=switches, trains=trains)
+    # Example: route from C to I
+    route = model.find_route("C", "I")
+    if route:
+        print(f"\nRoute C → I ({len(route)} edges):")
+        for e in route:
+            print(f"  {e}")
+        print(f"Switch settings: {model.route_switch_settings(route)}")
+        print(f"Blocks to acquire: {model.route_blocks(route)}")
+        print(f"Sensors on route: {model.route_sensors(route)}")
