@@ -12,14 +12,14 @@ commands to a train under dispatcher control.
 from __future__ import annotations
 
 import asyncio
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from config import Settings
 from controllers.switch_controller import SwitchController
 from controllers.train_controller import TrainController
 from dispatcher.block_manager import BlockManager
 from dispatcher.mqtt_bridge import MqttBridge, TagEvent
-from dispatcher.track_model import TrackEdge, TrackModel
+from dispatcher.track_model import Edge, TrackModel
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -28,11 +28,11 @@ logger = get_logger(__name__)
 class Dispatcher:
     """
     Event-driven orchestrator: on each tag read it updates the train's
-    position, releases the block it just left (advancing any queued train),
-    and either advances the reporting train onto its next block or stops it
-    if that block isn't free. A watchdog stops every train if one goes too
-    long without an expected tag, and auto-clears once that train's tag
-    reappears.
+    position, releases the chain of blocks it just cleared (advancing any
+    queued trains), and either advances the reporting train onto its next
+    block chain or stops it if that chain isn't free. A watchdog stops every
+    train if one goes too long without an expected tag, and auto-clears once
+    that train's tag reappears.
     """
 
     def __init__(
@@ -57,7 +57,7 @@ class Dispatcher:
         self._consumer_task: Optional[asyncio.Task] = None
         self._emergency = False
         self._emergency_train_id: Optional[str] = None
-        self._pending_edge: Dict[str, TrackEdge] = {}
+        self._pending_chain: Dict[str, List[Edge]] = {}
 
     async def run(self) -> None:
         """Start the MQTT bridge and process tag events until `stop()`."""
@@ -95,8 +95,8 @@ class Dispatcher:
             )
             return
 
-        tag_id = self._track_model.tag_id_for_uid(event.tag_uid)
-        if tag_id is None:
+        sensor_id = self._track_model.sensor_id_for_uid(event.tag_uid)
+        if sensor_id is None:
             logger.warning(
                 f"Ignoring unknown RFID UID {event.tag_uid} from train {event.train_id}"
             )
@@ -105,7 +105,7 @@ class Dispatcher:
         was_emergency_train = event.train_id == self._emergency_train_id
 
         result = self._track_model.record_tag_event(
-            event.train_id, tag_id, event.timestamp
+            event.train_id, sensor_id, event.timestamp
         )
 
         if was_emergency_train and self._emergency:
@@ -117,43 +117,46 @@ class Dispatcher:
             self._emergency_train_id = None
             await self._resume_all_after_emergency()
 
-        if result.edge_completed is not None:
-            retry_train = await self._block_manager.release(
-                event.train_id, result.edge_completed
+        if result.edges_completed:
+            retry_trains = await self._block_manager.release(
+                event.train_id, result.edges_completed
             )
-            if retry_train is not None:
-                retry_edge = self._track_model.next_edge_for_train(retry_train)
-                await self._attempt_advance(retry_train, retry_edge)
+            for retry_train in retry_trains:
+                retry_chain = self._track_model.next_block_chain_for_train(retry_train)
+                await self._attempt_advance(retry_train, retry_chain)
 
         if self._emergency:
             return
 
-        next_edge = self._track_model.next_edge_for_train(event.train_id)
-        await self._attempt_advance(event.train_id, next_edge)
+        next_chain = self._track_model.next_block_chain_for_train(event.train_id)
+        await self._attempt_advance(event.train_id, next_chain)
 
-    async def _attempt_advance(self, train_id: str, edge: Optional[TrackEdge]) -> None:
-        """Try to move `train_id` onto `edge`; stop it if that isn't possible."""
-        if edge is None:
+    async def _attempt_advance(
+        self, train_id: str, chain: Optional[List[Edge]]
+    ) -> None:
+        """Try to move `train_id` onto `chain`; stop it if that isn't possible."""
+        if not chain:
             return
 
-        self._pending_edge[train_id] = edge
+        self._pending_chain[train_id] = chain
 
-        granted = await self._block_manager.request_entry(train_id, edge)
+        granted = await self._block_manager.request_entry(train_id, chain)
         if not granted:
             await self._stop_train(train_id)
             return
 
-        switches_ok = await self._block_manager.set_switches_for_edge(
-            edge, self._switch_controller
+        switches_ok = await self._block_manager.set_switches_for_chain(
+            chain, self._switch_controller
         )
         if not switches_ok:
             # Unsafe to proceed with a partially-set switch: give back the
-            # block we just reserved and hold the train.
-            await self._block_manager.release(train_id, edge)
+            # blocks we just reserved and hold the train.
+            await self._block_manager.release(train_id, chain)
             await self._stop_train(train_id)
             return
 
-        self._pending_edge.pop(train_id, None)
+        self._track_model.grant_pending_chain(train_id, chain)
+        self._pending_chain.pop(train_id, None)
         await self._resume_train(train_id)
 
     async def _stop_train(self, train_id: str) -> None:
@@ -181,12 +184,12 @@ class Dispatcher:
             logger.warning(f"Could not resume train {train_id}: {e}")
 
     async def _resume_all_after_emergency(self) -> None:
-        """Re-evaluate every train's next edge after an e-stop auto-clears."""
+        """Re-evaluate every train's next chain after an e-stop auto-clears."""
         for train_id in list(self._track_model.trains.keys()):
-            edge = self._pending_edge.get(
+            chain = self._pending_chain.get(
                 train_id
-            ) or self._track_model.next_edge_for_train(train_id)
-            await self._attempt_advance(train_id, edge)
+            ) or self._track_model.next_block_chain_for_train(train_id)
+            await self._attempt_advance(train_id, chain)
 
     async def _watchdog_loop(self) -> None:
         """Periodically check for trains that have missed an expected tag."""

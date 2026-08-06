@@ -20,20 +20,62 @@ from config import get_settings
 from dispatcher.block_manager import BlockManager
 from dispatcher.dispatcher import Dispatcher
 from dispatcher.mqtt_bridge import TagEvent
-from dispatcher.track_model import build_sample_topology
+from dispatcher.track_model import TrackModel
 from utils.logging_config import get_logger, setup_logging
 
 logger = get_logger(__name__)
 
 
+# Demo-only wiring/routes for --mock runs: TRN-A takes the inner loop
+# (C-A-H-F-E-D), TRN-B takes the outer loop (B-J-I-F-E), sharing the F-E
+# block between the two loops -- exercising block contention too. Real
+# deployments configure this via Settings.switch_wiring / .train_routes
+# instead (see dispatcher/factory.py::build_dispatcher).
+DEMO_SWITCH_WIRING = {
+    "A": (101, "SWITCH_A"),
+    "B": (101, "SWITCH_B"),
+    "C": (101, "SWITCH_C"),
+    "F": (102, "SWITCH_A"),
+    "H": (102, "SWITCH_B"),
+    "I": (102, "SWITCH_C"),
+    "J": (102, "SWITCH_D"),
+}
+DEMO_TRAIN_ROUTES = {
+    "TRN-A": (12, ["C", "A", "H", "F", "E", "D"]),
+    "TRN-B": (22, ["B", "J", "I", "F", "E"]),
+}
+
+# Sensor ids (as strings) a train reports along its route -- see the sensor
+# ids on each edge in TrackModel._build_edges. Each entry marks the end of a
+# chain of blocks (some with no sensor of their own) that gets confirmed
+# together; see TrackModel.next_block_chain_for_train.
 DEFAULT_SCENARIO: List[dict] = [
-    {"delay_s": 0.2, "train_id": "TRN-A", "tag_uid": "T8"},
-    {"delay_s": 1.0, "train_id": "TRN-B", "tag_uid": "T1"},
-    {"delay_s": 1.0, "train_id": "TRN-A", "tag_uid": "T9"},
-    {"delay_s": 1.0, "train_id": "TRN-B", "tag_uid": "T2"},
-    {"delay_s": 1.0, "train_id": "TRN-A", "tag_uid": "T10"},
-    {"delay_s": 1.0, "train_id": "TRN-B", "tag_uid": "T3"},
+    {"delay_s": 0.2, "train_id": "TRN-A", "tag_uid": "4"},  # ends chain [CA, AH]
+    {"delay_s": 1.0, "train_id": "TRN-B", "tag_uid": "1"},  # ends chain [BJ]
+    {
+        "delay_s": 1.0,
+        "train_id": "TRN-A",
+        "tag_uid": "6",
+    },  # ends chain [HF, FE, ED, DC]
+    {"delay_s": 1.0, "train_id": "TRN-B", "tag_uid": "3"},  # ends chain [JI_S]
+    {"delay_s": 1.0, "train_id": "TRN-A", "tag_uid": "4"},  # ends chain [CA, AH]
+    {"delay_s": 1.0, "train_id": "TRN-B", "tag_uid": "5"},  # ends chain [IF, FE, EB]
+    {
+        "delay_s": 1.0,
+        "train_id": "TRN-A",
+        "tag_uid": "6",
+    },  # ends chain [HF, FE, ED, DC]
 ]
+
+
+def build_demo_track_model() -> TrackModel:
+    """Build the real TrackModel with demo wiring/routes for --mock runs."""
+    track_model = TrackModel()
+    for switch_id, (hub_id, port_name) in DEMO_SWITCH_WIRING.items():
+        track_model.configure_switch_wiring(switch_id, hub_id, port_name)
+    for train_id, (hub_id, route) in DEMO_TRAIN_ROUTES.items():
+        track_model.register_train(train_id, hub_id, route)
+    return track_model
 
 
 class FakeMqttBridge:
@@ -119,7 +161,7 @@ def _load_scenario(path: Optional[str]) -> List[dict]:
 
 async def _run(scenario_path: Optional[str], duration: Optional[float]) -> None:
     settings = get_settings()
-    track_model = build_sample_topology()
+    track_model = build_demo_track_model()
     block_manager = BlockManager(track_model)
     bridge = FakeMqttBridge(_load_scenario(scenario_path))
     dispatcher = Dispatcher(
@@ -144,10 +186,12 @@ async def _run(scenario_path: Optional[str], duration: Optional[float]) -> None:
     finally:
         await dispatcher.stop()
         logger.info(f"Final train positions: {track_model.train_position}")
-        logger.info(
-            "Final block states: "
-            f"{ {eid: s.value for eid, s in track_model.block_state.items()} }"
-        )
+        occupied = {
+            bid: block.occupied_by
+            for bid, block in track_model.blocks.items()
+            if block.occupied_by is not None
+        }
+        logger.info(f"Final occupied blocks: {occupied}")
 
 
 def main() -> None:
