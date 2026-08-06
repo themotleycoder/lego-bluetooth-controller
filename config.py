@@ -6,7 +6,7 @@ All configuration can be overridden via environment variables or .env file.
 """
 
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -178,6 +178,69 @@ class Settings(BaseSettings):
                 continue
             train_id, _, hub_id = pair.partition(":")
             mapping[train_id.strip()] = int(hub_id.strip())
+        return mapping
+
+    train_routes: str = Field(
+        default="",
+        description=(
+            "Semicolon-separated train_id:route pairs, route is a "
+            "'-'-joined cyclic list of switch ids, e.g. 'TRN-A:C-A-H-F-E-D;TRN-B:B-J-I-F-E'"
+        ),
+    )
+
+    @property
+    def train_routes_dict(self) -> Dict[str, List[str]]:
+        """Parse train_routes into a dict of train_id -> ordered list of switch ids."""
+        routes: Dict[str, List[str]] = {}
+        for pair in self.train_routes.split(";"):
+            pair = pair.strip()
+            if not pair:
+                continue
+            train_id, _, route = pair.partition(":")
+            switch_ids = [s.strip() for s in route.split("-") if s.strip()]
+            if switch_ids:
+                routes[train_id.strip()] = switch_ids
+        return routes
+
+    switch_wiring: str = Field(
+        default="",
+        description=(
+            "Comma-separated switch_id:hub_id:port_name triples for motorized "
+            "switches, e.g. 'A:11:SWITCH_A,B:11:SWITCH_B'"
+        ),
+    )
+
+    @property
+    def switch_wiring_dict(self) -> Dict[str, Tuple[int, str]]:
+        """Parse switch_wiring into a dict of switch_id -> (hub_id, port_name)."""
+        wiring: Dict[str, Tuple[int, str]] = {}
+        for triple in self.switch_wiring.split(","):
+            triple = triple.strip()
+            if not triple:
+                continue
+            switch_id, _, rest = triple.partition(":")
+            hub_id, _, port_name = rest.partition(":")
+            wiring[switch_id.strip()] = (int(hub_id.strip()), port_name.strip())
+        return wiring
+
+    sensor_uid_mapping: str = Field(
+        default="",
+        description=(
+            "Comma-separated sensor_id:uid pairs mapping logical sensor ids to "
+            "physical RFID tag UIDs, e.g. '1:04AABBCC,2:04CCDDEE'"
+        ),
+    )
+
+    @property
+    def sensor_uid_mapping_dict(self) -> Dict[int, str]:
+        """Parse sensor_uid_mapping into a dict of sensor_id -> physical UID."""
+        mapping: Dict[int, str] = {}
+        for pair in self.sensor_uid_mapping.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            sensor_id, _, uid = pair.partition(":")
+            mapping[int(sensor_id.strip())] = uid.strip()
         return mapping
 
     model_config = SettingsConfigDict(
