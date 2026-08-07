@@ -130,7 +130,7 @@ class StubTrainController:
         """Pretend both sample-topology trains are already BLE-registered."""
         self.train_statuses = {12: {}, 22: {}}
 
-    async def handle_command(self, hub_id: int, power: int) -> None:
+    async def handle_command(self, hub_id: str, power: int) -> None:
         """Log the power command that would have been sent over BLE."""
         logger.info(
             f"[mock] TrainController.handle_command(hub_id={hub_id}, power={power})"

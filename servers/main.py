@@ -4,8 +4,6 @@ import subprocess
 
 from controllers.switch_controller import SwitchController
 from controllers.train_controller import TrainController
-from servers.bluetooth_scanner import BetterBleScanner
-from utils.constants import TRAIN_COMMAND
 
 
 class LegoController:
@@ -54,21 +52,50 @@ class LegoController:
             print("ad: Switch A to DIVERGING")
             print("bs: Switch B to STRAIGHT")
             print("bd: Switch B to DIVERGING")
-            print("\nTrain Commands:")
-            print("ts: Stop train")
-            print("tf[power]: Forward (optional power 0-100, e.g. tf50)")
-            print("tb[power]: Backward (optional power 0-100, e.g. tb75)")
+            print("\nTrain Commands (address is the train hub's BLE address):")
+            print("train <address> stop")
+            print("train <address> forward [power]   (default power 40)")
+            print("train <address> backward [power]  (default power 40)")
             print("r: Reset Bluetooth")
             print("q: Quit")
 
             while self.running:
                 try:
                     # Use asyncio.create_task for input to prevent blocking
-                    cmd = await asyncio.get_event_loop().run_in_executor(
+                    raw = await asyncio.get_event_loop().run_in_executor(
                         None, input, "> "
                     )
+                    raw = raw.strip()
+                    if not raw:
+                        continue
 
-                    hub, cmd = self.extract_number_and_command(cmd)
+                    if raw.lower().startswith("train "):
+                        parts = raw.split()
+                        if len(parts) < 3:
+                            print(
+                                "Usage: train <address> <stop|forward|backward> [power]"
+                            )
+                            continue
+
+                        address = parts[1]
+                        action = parts[2].lower()
+                        power = (
+                            int(parts[3])
+                            if len(parts) > 3 and parts[3].isdigit()
+                            else 40
+                        )
+
+                        if action == "stop":
+                            await self.train_controller.handle_command(address, 0)
+                        elif action == "forward":
+                            await self.train_controller.handle_command(address, power)
+                        elif action == "backward":
+                            await self.train_controller.handle_command(address, -power)
+                        else:
+                            print(f"Unknown train action: {action}")
+                        continue
+
+                    hub, cmd = self.extract_number_and_command(raw)
 
                     if cmd.lower() == "q":
                         self.running = False
@@ -76,7 +103,7 @@ class LegoController:
                         await self.switch_controller.stop_status_monitoring()
                         await self.train_controller.stop_status_monitoring()
                         self.switch_controller.scanner.reset_bluetooth()
-                        self.train_controller.reset_bluetooth()
+                        await self.train_controller.reset_bluetooth()
                         switch_monitor_task.cancel()  # Cancel old monitoring tasks
                         train_monitor_task.cancel()
                         switch_monitor_task = asyncio.create_task(
@@ -101,26 +128,8 @@ class LegoController:
                         await self.switch_controller.send_command_with_retry(
                             hub, "SWITCH_B", 1
                         )
-                    elif cmd.lower().startswith("ts"):
-                        await self.train_controller.send_command_with_retry(
-                            hub, TRAIN_COMMAND["STOP"]
-                        )
-                    elif cmd.lower().startswith("tf"):
-                        # Extract power value if provided (e.g. tf50)
-                        power = (
-                            int(cmd[2:]) if len(cmd) > 2 and cmd[2:].isdigit() else 40
-                        )
-                        await self.train_controller.send_command_with_retry(
-                            hub, TRAIN_COMMAND["FORWARD"], power
-                        )
-                    elif cmd.lower().startswith("tb"):
-                        # Extract power value if provided (e.g. tb75)
-                        power = (
-                            int(cmd[2:]) if len(cmd) > 2 and cmd[2:].isdigit() else 40
-                        )
-                        await self.train_controller.send_command_with_retry(
-                            hub, TRAIN_COMMAND["BACKWARD"], power
-                        )
+                    else:
+                        print(f"Unknown command: {raw}")
                 except asyncio.CancelledError:
                     break
                 except Exception as e:

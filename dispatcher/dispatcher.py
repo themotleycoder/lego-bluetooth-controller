@@ -4,9 +4,9 @@ Main orchestrator for the RFID dispatcher.
 Consumes RFID tag events from the MQTT bridge, updates the track model,
 enforces block/switch locking via BlockManager, and drives trains through
 the existing BLE-based TrainController/SwitchController. Manual REST
-commands (POST /train, /selfdrive) bypass the dispatcher entirely in this
-version -- operators are responsible for not issuing conflicting manual
-commands to a train under dispatcher control.
+commands (POST /train) bypass the dispatcher entirely in this version --
+operators are responsible for not issuing conflicting manual commands to
+a train under dispatcher control.
 """
 
 from __future__ import annotations

@@ -1,151 +1,193 @@
 import asyncio
-import subprocess
 import time
-import struct
+from typing import Dict, Optional
+
+from bleak import BleakClient, BleakScanner
+from bleak.backends.device import BLEDevice
+
 from servers.bluetooth_scanner import BetterBleScanner
+from utils.constants import LEGO_HUB_CHAR, LEGO_HUB_SERVICE, PORT_A
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
 class TrainController:
-    def __init__(self):
-        self.command_number = 0x01
-        self.scanner = BetterBleScanner()
+    """
+    Controls LEGO trains running stock hub firmware over a direct GATT
+    connection (LEGO Wireless Protocol 3.0), rather than the Pybricks
+    broadcast/observe protocol used for switches.
+
+    Hubs are identified by their BLE address (e.g. "90:84:2B:18:28:36").
+    """
+
+    def __init__(self, max_reconnect_attempts: int = 3, reconnect_delay: float = 2.0):
         self.running = True
-        self.train_statuses = {}
-        self.last_update_times = {}
-        self.train_channels = {}
-        self._active_trains = set()  # Track active trains
-        self._train_self_drive = {}  # Track self-drive state for each train
-        # Add command queue for better performance
+        self.max_reconnect_attempts = max_reconnect_attempts
+        self.reconnect_delay = reconnect_delay
+
+        # Adapter-level reset only (bluetoothctl power cycle) -- scanning
+        # for trains is done with a raw BleakScanner below, not via this.
+        self._adapter = BetterBleScanner()
+
+        self._clients: Dict[str, BleakClient] = {}
+        self._connecting: set = set()
+        self._connection_state: Dict[str, str] = {}  # address -> state
+        self._hub_names: Dict[str, str] = {}
+        self._hub_rssi: Dict[str, Optional[int]] = {}
+        self._last_seen: Dict[str, float] = {}
+        self._last_command_time: Dict[str, float] = {}
+
+        self._active_trains = set()
+        self._scanner: Optional[BleakScanner] = None
+
         self.command_queue = asyncio.Queue()
         self.command_task = None
 
-    def register_train(self, hub_id: int, command_channel: int):
-        """Register a train and its command channel"""
-        self.train_channels[hub_id] = command_channel
-        logger.info(f"Registered train {hub_id} on command channel {command_channel}")
+    async def reset_bluetooth(self):
+        """Disconnect all hubs and reset the Bluetooth adapter."""
+        for address, client in list(self._clients.items()):
+            try:
+                await client.disconnect()
+            except Exception as e:
+                logger.warning(f"Error disconnecting {address}: {e}")
 
-    def get_train_channel(self, hub_id: int) -> int:
-        """Get the command channel for a specific train"""
-        if hub_id not in self.train_channels:
-            raise ValueError(
-                f"Train {hub_id} not registered. Please register train with command channel first."
-            )
-        return self.train_channels[hub_id]
+        self._clients.clear()
+        self._connection_state = {
+            addr: "disconnected" for addr in self._connection_state
+        }
+        await self._adapter.reset_bluetooth()
 
-    def reset_bluetooth(self):
-        """Reset Bluetooth to a known state"""
-        self.scanner.reset_bluetooth()
-
-    def mark_train_active(self, hub_id):
+    def mark_train_active(self, hub_id: str):
         """Mark a train as active for more frequent updates"""
         self._active_trains.add(hub_id)
 
-    def mark_train_inactive(self, hub_id):
+    def mark_train_inactive(self, hub_id: str):
         """Mark a train as inactive"""
         self._active_trains.discard(hub_id)
 
-    async def _mark_inactive_later(self, hub_id):
+    async def _mark_inactive_later(self, hub_id: str):
         """Mark train as inactive after delay"""
         await asyncio.sleep(5)
         self.mark_train_inactive(hub_id)
 
+    # ------------------------------------------------------------------
+    # Discovery + connection management
+    # ------------------------------------------------------------------
+
+    async def _connect_hub(self, address: str, device: Optional[BLEDevice] = None):
+        """Connect to a hub and subscribe to status notifications, with retry."""
+        if address in self._clients or address in self._connecting:
+            return
+
+        self._connecting.add(address)
+        self._connection_state[address] = "connecting"
+        try:
+            for attempt in range(self.max_reconnect_attempts):
+                try:
+                    client = BleakClient(
+                        device or address,
+                        disconnected_callback=lambda c, addr=address: self._on_disconnect(
+                            addr
+                        ),
+                    )
+                    await client.connect()
+                    await client.start_notify(
+                        LEGO_HUB_CHAR, self._make_notification_handler(address)
+                    )
+
+                    self._clients[address] = client
+                    self._connection_state[address] = "connected"
+                    self._last_seen[address] = time.time()
+                    logger.info(f"Connected to train hub {address}")
+                    return
+
+                except Exception as e:
+                    logger.warning(
+                        f"Connect attempt {attempt + 1}/{self.max_reconnect_attempts} "
+                        f"failed for {address}: {e}"
+                    )
+                    if attempt < self.max_reconnect_attempts - 1:
+                        await asyncio.sleep(self.reconnect_delay)
+
+            self._connection_state[address] = "error"
+            logger.error(
+                f"Failed to connect to train hub {address} after "
+                f"{self.max_reconnect_attempts} attempts"
+            )
+        finally:
+            self._connecting.discard(address)
+
+    def _on_disconnect(self, address: str):
+        """Handle an unexpected hub disconnect by clearing state and reconnecting."""
+        logger.warning(f"Train hub {address} disconnected")
+        self._connection_state[address] = "disconnected"
+        self._clients.pop(address, None)
+        if self.running:
+            asyncio.create_task(self._connect_hub(address))
+
+    def _make_notification_handler(self, address: str):
+        """Build a per-hub notification callback that updates last-seen time."""
+
+        def handler(_sender, data: bytearray):
+            self._last_seen[address] = time.time()
+            logger.debug(
+                f"Notification from {address}: " f"{' '.join(f'{b:02x}' for b in data)}"
+            )
+
+        return handler
+
     async def start_status_monitoring(self):
-        """Start monitoring for status updates from trains"""
-
-        async def status_callback(device, advertisement_data):
-            try:
-                if device.name and "Train" in device.name:
-                    if 919 in advertisement_data.manufacturer_data:
-                        data = advertisement_data.manufacturer_data[919]
-
-                        try:
-                            # Get listening channel from data
-                            listening_channel = int(data[2])
-                            hub_id = listening_channel
-
-                            # Auto-register using listening channel
-                            if hub_id not in self.train_channels:
-                                logger.info(
-                                    f"Auto-registering train {hub_id} using channel {listening_channel}"
-                                )
-                                self.register_train(hub_id, listening_channel)
-
-                            current_time = time.time()
-                            last_update = self.last_update_times.get(hub_id, 0)
-
-                            # More frequent updates for active trains
-                            update_threshold = (
-                                0.1 if hub_id in self._active_trains else 0.5
-                            )
-                            if current_time - last_update >= update_threshold:
-                                status_value = data[-2]
-                                current_power = struct.unpack("b", bytes([data[-1]]))[0]
-
-                                self.train_statuses[hub_id] = {
-                                    "status": (
-                                        "running" if status_value > 0 else "stopped"
-                                    ),
-                                    "speed": current_power,
-                                    "direction": (
-                                        "forward" if current_power >= 0 else "backward"
-                                    ),
-                                    "connected": True,
-                                    "timestamp": current_time,
-                                    "name": device.name,
-                                    "selfDrive": self._train_self_drive.get(
-                                        hub_id, False
-                                    ),
-                                    "rssi": advertisement_data.rssi,
-                                    "channel": listening_channel,
-                                }
-                                self.last_update_times[hub_id] = current_time
-                                logger.debug(
-                                    f"Updated status for train {hub_id}: {self.train_statuses[hub_id]}"
-                                )
-
-                        except Exception as e:
-                            logger.error(
-                                f"Error processing hub data: {e}", exc_info=True
-                            )
-                            import traceback
-
-                            traceback.print_exc()
-
-            except Exception as e:
-                logger.error(f"Error in status callback: {e}", exc_info=True)
-                import traceback
-
-                traceback.print_exc()
-
-        logger.info("Starting train status monitoring...")
+        """Scan for LEGO hubs and maintain persistent GATT connections to them."""
+        logger.info("Starting train status monitoring (GATT)...")
+        self.running = True
         self.command_task = asyncio.create_task(self._process_commands())
+
+        def detection_callback(device: BLEDevice, advertisement_data):
+            self._hub_names[device.address] = device.name or self._hub_names.get(
+                device.address, "LEGO Hub"
+            )
+            self._hub_rssi[device.address] = advertisement_data.rssi
+            self._last_seen[device.address] = time.time()
+            self._connection_state.setdefault(device.address, "disconnected")
+
+            if (
+                device.address not in self._clients
+                and device.address not in self._connecting
+            ):
+                asyncio.create_task(self._connect_hub(device.address, device))
 
         while self.running:
             try:
-                logger.debug("Setting up scanner...")
-                await self.scanner.start_scan(status_callback)
-                logger.debug("Scanner started, waiting for events...")
+                logger.debug("Starting train hub scanner...")
+                self._scanner = BleakScanner(
+                    detection_callback, service_uuids=[LEGO_HUB_SERVICE]
+                )
+                await self._scanner.start()
+                logger.info("Train hub scanning started")
 
                 while self.running:
-                    await asyncio.sleep(
-                        0.05
-                    )  # Reduced sleep time for better responsiveness
+                    await asyncio.sleep(0.5)
 
             except Exception as e:
-                logger.error(f"Error in monitor loop: {e}", exc_info=True)
-                logger.info("Waiting before retry...")
-                await asyncio.sleep(1)  # Reduced retry delay
+                logger.error(f"Error in train scanning loop: {e}", exc_info=True)
+                await asyncio.sleep(1)
             finally:
-                await self.scanner.stop_scan()
+                if self._scanner is not None:
+                    try:
+                        await self._scanner.stop()
+                    except Exception as e:
+                        logger.warning(f"Error stopping train scanner: {e}")
+                    self._scanner = None
+
+    # ------------------------------------------------------------------
+    # Commands
+    # ------------------------------------------------------------------
 
     async def _process_commands(self):
         """Background task to process commands from queue with batching"""
         while self.running:
             try:
-                # Get all pending commands (up to 5)
                 commands = []
                 try:
                     while len(commands) < 5:
@@ -153,167 +195,84 @@ class TrainController:
                         commands.append(command)
                 except asyncio.QueueEmpty:
                     if not commands:
-                        # If no commands, wait for the next one
                         commands.append(await self.command_queue.get())
 
-                # Process all collected commands
                 for command in commands:
                     await self._execute_command(command)
                     self.command_queue.task_done()
 
-                # Small delay between batches
                 await asyncio.sleep(0.02)
 
             except Exception as e:
                 logger.error(f"Error processing command batch: {e}", exc_info=True)
 
     async def _execute_command(self, command):
-        """Execute a single command"""
-        hub_id, value_bytes = command  # Now only expecting 2 values
+        """Send a single motor power command over the hub's GATT connection."""
+        hub_id, power = command
+        client = self._clients.get(hub_id)
+        if client is None or not client.is_connected:
+            logger.warning(f"Cannot send command to train {hub_id}: not connected")
+            return
+
+        power_byte = (256 + power) if power < 0 else power
+        payload = bytes([0x08, 0x00, 0x81, PORT_A, 0x11, 0x51, 0x00, power_byte])
+
         try:
-            command_channel = self.get_train_channel(hub_id)
-
-            payload = (
-                bytes([0x08, 0xFF, 0x97, 0x03, command_channel, 0x00, 0x61])
-                + value_bytes
-            )
-
-            # Create a single combined HCI command string
-            hci_commands = [
-                # Stop advertising
-                ["sudo", "hcitool", "cmd", "0x08", "0x000A", "00"],
-                # Set advertising parameters - reduced interval for faster response
-                [
-                    "sudo",
-                    "hcitool",
-                    "cmd",
-                    "0x08",
-                    "0x0006",
-                    "32",
-                    "00",  # 50ms interval (faster than 100ms but still reliable)
-                    "32",
-                    "00",  # Same interval
-                    "03",  # non-connectable
-                    "00",
-                    "00",
-                    "00",
-                    "00",
-                    "00",
-                    "00",
-                    "00",
-                    "00",
-                    "07",
-                    "00",
-                ],
-                # Set advertising data
-                ["sudo", "hcitool", "cmd", "0x08", "0x0008"]
-                + [format(len(payload), "x")]
-                + [format(b, "02x") for b in payload],
-                # Start advertising
-                ["sudo", "hcitool", "cmd", "0x08", "0x000A", "01"],
-            ]
-
-            # Execute commands with minimal delays
-            for cmd in hci_commands:
-                subprocess.run(cmd, capture_output=True)
-                await asyncio.sleep(0.02)  # Minimal delay between commands
-
-            # Channel-specific handling
-            if command_channel == 22:
-                # Extra time for channel 22 which needs it
-                await asyncio.sleep(0.1)
-                # Send a second pulse for reliability
-                subprocess.run(hci_commands[-2], capture_output=True)  # Resend data
-                subprocess.run(
-                    hci_commands[-1], capture_output=True
-                )  # Restart advertising
-                await asyncio.sleep(0.1)
-
+            await client.write_gatt_char(LEGO_HUB_CHAR, payload, response=True)
+            self._last_command_time[hub_id] = time.time()
         except Exception as e:
-            logger.error(f"Error executing command: {e}", exc_info=True)
+            logger.error(f"Error sending motor command to {hub_id}: {e}", exc_info=True)
             raise
 
-    async def handle_command(self, hub_id: int, power: int):
+    async def handle_command(self, hub_id: str, power: int):
         """Queue a power command for processing"""
         try:
-            if hub_id not in self.train_statuses:
-                available_trains = list(self.train_statuses.keys())
+            if hub_id not in self._connection_state:
+                available_trains = list(self._connection_state.keys())
                 raise ValueError(
                     f"Train {hub_id} not found. Available trains: {available_trains}"
                 )
 
             logger.info(f"Setting train {hub_id} power to: {power}%")
             self.mark_train_active(hub_id)
-            # Encode power commands as values from -100 to 100
             clamped_power = max(min(power, 100), -100)
-            value_bytes = struct.pack("b", clamped_power)
-            await self.command_queue.put((hub_id, value_bytes))
+            await self.command_queue.put((hub_id, clamped_power))
 
             asyncio.create_task(self._mark_inactive_later(hub_id))
 
+        except ValueError:
+            raise
         except Exception as e:
             logger.error(f"Error queueing train command: {e}", exc_info=True)
-            import traceback
-
-            traceback.print_exc()
             raise
 
-    async def handle_drive_command(self, hub_id: int, self_drive: int = 0):
-        """Queue a self-drive command for processing"""
-        try:
-            if hub_id not in self.train_statuses:
-                available_trains = list(self.train_statuses.keys())
-                raise ValueError(
-                    f"Train {hub_id} not found. Available trains: {available_trains}"
-                )
+    # ------------------------------------------------------------------
+    # Status
+    # ------------------------------------------------------------------
 
-            logger.info(f"Setting train {hub_id} self drive to: {self_drive}")
-            self.mark_train_active(hub_id)
-            # Update self-drive state in our tracking dictionary
-            self._train_self_drive[hub_id] = bool(self_drive)
-            # Encode self-drive commands as values above 100 (e.g., 101 for on, 102 for off)
-            value = 101 if self_drive else 102
-            value_bytes = struct.pack("b", value)
-            await self.command_queue.put((hub_id, value_bytes))
-
-            asyncio.create_task(self._mark_inactive_later(hub_id))
-
-        except Exception as e:
-            logger.error(f"Error queueing train command: {e}", exc_info=True)
-            import traceback
-
-            traceback.print_exc()
-            raise
-
-    def get_connected_trains(self):
-        """Return information about all connected trains"""
+    def get_connected_trains(self) -> dict:
+        """Return information about all known trains, keyed by BLE address."""
         try:
             current_time = time.time()
-            connected_trains = {}
+            trains = {}
 
-            for hub_id, status in self.train_statuses.items():
-                try:
-                    timestamp = float(status.get("timestamp", 0))
-                    last_update = current_time - timestamp
+            for address, state in self._connection_state.items():
+                last_seen = self._last_seen.get(address)
+                trains[address] = {
+                    "connected": state == "connected",
+                    "state": state,
+                    "name": self._hub_names.get(address, "LEGO Hub"),
+                    "rssi": self._hub_rssi.get(address),
+                    "last_update_seconds_ago": (
+                        round(current_time - last_seen, 2)
+                        if last_seen is not None
+                        else None
+                    ),
+                    "last_command_time": self._last_command_time.get(address),
+                    "active": address in self._active_trains,
+                }
 
-                    if last_update < 5:
-                        connected_trains[hub_id] = {
-                            "status": status.get("status", "unknown"),
-                            "speed": status.get("speed", 0),
-                            "direction": status.get("direction", "unknown"),
-                            "name": status.get("name", f"Train {hub_id}"),
-                            "selfDrive": self._train_self_drive.get(hub_id, False),
-                            "last_update_seconds_ago": round(last_update, 2),
-                            "rssi": status.get("rssi", 0),
-                            "channel": status.get("channel"),  # Include channel info
-                            "active": hub_id
-                            in self._active_trains,  # Include active status
-                        }
-                except Exception as e:
-                    logger.error(f"Error processing train {hub_id}: {e}", exc_info=True)
-                    continue
-
-            return connected_trains
+            return trains
         except Exception as e:
             logger.error(f"Error in get_connected_trains: {e}", exc_info=True)
             return {}
@@ -322,5 +281,22 @@ class TrainController:
         """Stop monitoring for status updates"""
         logger.info("Stopping train status monitoring...")
         self.running = False
-        await self.scanner.stop_scan()
+        if self.command_task:
+            self.command_task.cancel()
+            try:
+                await self.command_task
+            except asyncio.CancelledError:
+                pass
+        if self._scanner is not None:
+            try:
+                await self._scanner.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping train scanner: {e}")
+            self._scanner = None
+        for address, client in list(self._clients.items()):
+            try:
+                await client.disconnect()
+            except Exception as e:
+                logger.warning(f"Error disconnecting {address}: {e}")
+        self._clients.clear()
         logger.info("Train monitor stopped")

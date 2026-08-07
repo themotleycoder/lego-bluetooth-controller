@@ -121,7 +121,7 @@ class Train:
     """A train's identity and its fixed, pre-assigned cyclic route through switches."""
 
     id: str
-    hub_id: int
+    hub_id: str  # BLE address of the train hub, e.g. "90:84:2B:18:28:36"
     route: list[str]  # cyclic list of switch ids
 
 
@@ -463,7 +463,7 @@ class TrackModel:
     # Train registry and live position/movement tracking
     # ------------------------------------------------------------------
 
-    def register_train(self, train_id: str, hub_id: int, route: list[str]) -> None:
+    def register_train(self, train_id: str, hub_id: str, route: list[str]) -> None:
         """Register a train with its fixed, pre-assigned cyclic route of switch ids."""
         if not route:
             raise ValueError(f"Train {train_id} needs a non-empty route")

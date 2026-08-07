@@ -49,7 +49,9 @@ class TestTrainControlEndpoints:
 
     def test_train_power_without_auth(self, client):
         """Test train power endpoint rejects requests without API key."""
-        response = client.post("/train", json={"hub_id": 12, "power": 50})
+        response = client.post(
+            "/train", json={"hub_id": "90:84:2B:18:28:36", "power": 50}
+        )
 
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
         data = response.json()
@@ -59,7 +61,7 @@ class TestTrainControlEndpoints:
         """Test train power endpoint rejects invalid API key."""
         response = client.post(
             "/train",
-            json={"hub_id": 12, "power": 50},
+            json={"hub_id": "90:84:2B:18:28:36", "power": 50},
             headers={"X-API-Key": invalid_api_key},
         )
 
@@ -73,21 +75,21 @@ class TestTrainControlEndpoints:
         """Test train power endpoint accepts valid API key."""
         response = client.post(
             "/train",
-            json={"hub_id": 12, "power": 50},
+            json={"hub_id": "90:84:2B:18:28:36", "power": 50},
             headers={"X-API-Key": test_api_key},
         )
 
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
         assert data["status"] == "success"
-        assert data["hub_id"] == 12
+        assert data["hub_id"] == "90:84:2B:18:28:36"
         assert data["power"] == 50
 
     def test_train_power_validation_too_high(self, client, test_api_key):
         """Test train power validation rejects power > 100."""
         response = client.post(
             "/train",
-            json={"hub_id": 12, "power": 150},
+            json={"hub_id": "90:84:2B:18:28:36", "power": 150},
             headers={"X-API-Key": test_api_key},
         )
 
@@ -99,7 +101,7 @@ class TestTrainControlEndpoints:
         """Test train power validation rejects power < -100."""
         response = client.post(
             "/train",
-            json={"hub_id": 12, "power": -150},
+            json={"hub_id": "90:84:2B:18:28:36", "power": -150},
             headers={"X-API-Key": test_api_key},
         )
 
@@ -110,7 +112,7 @@ class TestTrainControlEndpoints:
         # Test minimum power
         response = client.post(
             "/train",
-            json={"hub_id": 12, "power": -100},
+            json={"hub_id": "90:84:2B:18:28:36", "power": -100},
             headers={"X-API-Key": test_api_key},
         )
         assert response.status_code == status.HTTP_200_OK
@@ -118,7 +120,7 @@ class TestTrainControlEndpoints:
         # Test maximum power
         response = client.post(
             "/train",
-            json={"hub_id": 12, "power": 100},
+            json={"hub_id": "90:84:2B:18:28:36", "power": 100},
             headers={"X-API-Key": test_api_key},
         )
         assert response.status_code == status.HTTP_200_OK
@@ -126,39 +128,10 @@ class TestTrainControlEndpoints:
         # Test zero power
         response = client.post(
             "/train",
-            json={"hub_id": 12, "power": 0},
+            json={"hub_id": "90:84:2B:18:28:36", "power": 0},
             headers={"X-API-Key": test_api_key},
         )
         assert response.status_code == status.HTTP_200_OK
-
-    def test_selfdrive_without_auth(self, client):
-        """Test self-drive endpoint rejects requests without API key."""
-        response = client.post("/selfdrive", json={"hub_id": 12, "self_drive": 1})
-
-        assert response.status_code == status.HTTP_401_UNAUTHORIZED
-
-    def test_selfdrive_with_valid_auth(self, client, test_api_key):
-        """Test self-drive endpoint with valid authentication."""
-        response = client.post(
-            "/selfdrive",
-            json={"hub_id": 12, "self_drive": 1},
-            headers={"X-API-Key": test_api_key},
-        )
-
-        assert response.status_code == status.HTTP_200_OK
-        data = response.json()
-        assert data["status"] == "success"
-        assert data["self_drive"] == 1
-
-    def test_selfdrive_validation(self, client, test_api_key):
-        """Test self-drive validation (must be 0 or 1)."""
-        response = client.post(
-            "/selfdrive",
-            json={"hub_id": 12, "self_drive": 2},
-            headers={"X-API-Key": test_api_key},
-        )
-
-        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
 
 class TestSwitchControlEndpoints:

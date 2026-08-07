@@ -104,7 +104,9 @@ class TestSwitchAndSensorWiring:
 class TestTrainRegistration:
     def _build(self) -> TrackModel:
         model = TrackModel()
-        model.register_train("T1", hub_id=12, route=["C", "A", "H", "F", "E", "D"])
+        model.register_train(
+            "T1", hub_id="90:84:2B:18:28:36", route=["C", "A", "H", "F", "E", "D"]
+        )
         return model
 
     def test_register_train_sets_initial_state(self):
@@ -115,12 +117,12 @@ class TestTrainRegistration:
     def test_register_train_empty_route_raises(self):
         model = TrackModel()
         with pytest.raises(ValueError):
-            model.register_train("T1", hub_id=12, route=[])
+            model.register_train("T1", hub_id="90:84:2B:18:28:36", route=[])
 
     def test_register_train_unknown_switch_raises(self):
         model = TrackModel()
         with pytest.raises(ValueError):
-            model.register_train("T1", hub_id=12, route=["A", "NOPE"])
+            model.register_train("T1", hub_id="90:84:2B:18:28:36", route=["A", "NOPE"])
 
     def test_mark_stopped_and_is_moving(self):
         model = self._build()
@@ -133,7 +135,9 @@ class TestTrainRegistration:
 class TestChainAdvancement:
     def _build(self) -> TrackModel:
         model = TrackModel()
-        model.register_train("T1", hub_id=12, route=["C", "A", "H", "F", "E", "D"])
+        model.register_train(
+            "T1", hub_id="90:84:2B:18:28:36", route=["C", "A", "H", "F", "E", "D"]
+        )
         return model
 
     def test_next_block_chain_stops_at_first_sensored_edge(self):
@@ -185,7 +189,9 @@ class TestChainAdvancement:
 class TestHopsToSwitch:
     def test_hops_to_switch(self):
         model = TrackModel()
-        model.register_train("T1", hub_id=12, route=["C", "A", "H", "F", "E", "D"])
+        model.register_train(
+            "T1", hub_id="90:84:2B:18:28:36", route=["C", "A", "H", "F", "E", "D"]
+        )
         assert model.hops_to_switch("T1", "C") == 0
         assert model.hops_to_switch("T1", "A") == 1
         assert model.hops_to_switch("T1", "D") == 5

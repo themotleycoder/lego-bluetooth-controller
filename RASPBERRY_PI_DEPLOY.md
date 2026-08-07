@@ -209,7 +209,7 @@ curl -X GET http://192.168.1.100:8000/connected/trains \
 curl -X POST http://192.168.1.100:8000/train \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key-here" \
-  -d '{"hub_id": 101, "power": 30}'
+  -d '{"hub_id": "90:84:2B:18:28:36", "power": 30}'
 ```
 
 **Train should move!** 🚂
@@ -434,7 +434,7 @@ curl http://192.168.1.100:8000/connected/trains \
 curl -X POST http://192.168.1.100:8000/train \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key-here" \
-  -d '{"hub_id": 101, "power": 50}'
+  -d '{"hub_id": "90:84:2B:18:28:36", "power": 50}'
 ```
 
 ---

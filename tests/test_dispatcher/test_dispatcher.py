@@ -38,6 +38,10 @@ class FakeBridge:
         self.published.append((train_id, action, value))
 
 
+TRN_A_HUB = "90:84:2B:18:28:36"
+TRN_B_HUB = "F3:33:66:0C:3A:6A"
+
+
 def build_two_train_model() -> TrackModel:
     """
     TRN-A and TRN-B both start needing the real A->H block (BLK_AH, requires
@@ -46,8 +50,8 @@ def build_two_train_model() -> TrackModel:
     """
     model = TrackModel()
     model.configure_switch_wiring("A", hub_id=1, port_name="SWITCH_A")
-    model.register_train("TRN-A", hub_id=12, route=["A", "H"])
-    model.register_train("TRN-B", hub_id=22, route=["A", "H"])
+    model.register_train("TRN-A", hub_id=TRN_A_HUB, route=["A", "H"])
+    model.register_train("TRN-B", hub_id=TRN_B_HUB, route=["A", "H"])
     return model
 
 
@@ -102,7 +106,7 @@ class TestTagEventHandling:
         await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))
 
         train_controller.handle_command.assert_awaited_with(
-            12, dispatcher._settings.dispatcher_cruise_power
+            TRN_A_HUB, dispatcher._settings.dispatcher_cruise_power
         )
 
     async def test_switches_are_set_before_the_train_is_allowed_through(self):
@@ -131,7 +135,7 @@ class TestTagEventHandling:
         await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))  # grants A->H
         await dispatcher._handle_tag_event(TagEvent("TRN-B", "1", 1.0))  # denied
 
-        train_controller.handle_command.assert_awaited_with(22, 0)
+        train_controller.handle_command.assert_awaited_with(TRN_B_HUB, 0)
 
     async def test_queued_train_resumes_once_block_is_released(self):
         (
@@ -151,7 +155,7 @@ class TestTagEventHandling:
         )  # releases BLK_AH
 
         train_controller.handle_command.assert_any_await(
-            22, dispatcher._settings.dispatcher_cruise_power
+            TRN_B_HUB, dispatcher._settings.dispatcher_cruise_power
         )
 
     async def test_unregistered_train_is_ignored(self):
@@ -204,7 +208,7 @@ class TestWatchdog:
                 for call in train_controller.handle_command.await_args_list
                 if call.args[1] == 0
             }
-            assert stopped_hub_ids == {12, 22}
+            assert stopped_hub_ids == {TRN_A_HUB, TRN_B_HUB}
         finally:
             dispatcher.running = False
             watchdog_task.cancel()

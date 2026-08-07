@@ -4,9 +4,7 @@ from typing import Dict, List, Optional
 from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 
-# Constants from pybricksdev
-LEGO_HUB_SERVICE = "00001623-1212-efde-1623-785feabcd123"
-LEGO_HUB_CHAR = "00001624-1212-efde-1623-785feabcd123"
+from utils.constants import LEGO_HUB_SERVICE, LEGO_HUB_CHAR
 
 
 class HubConnectionState(Enum):

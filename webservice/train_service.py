@@ -157,23 +157,11 @@ async def shutdown_event():
 class TrainPowerCommand(BaseModel):
     """Command to control train motor power."""
 
-    hub_id: int = Field(..., ge=0, description="Hub ID of the train")
+    hub_id: str = Field(..., description="BLE address of the train hub")
     power: int = Field(..., ge=-100, le=100, description="Motor power from -100 to 100")
 
     class Config:
-        json_schema_extra = {"example": {"hub_id": 12, "power": 50}}
-
-
-class TrainDriveCommand(BaseModel):
-    """Command to toggle train self-drive mode."""
-
-    hub_id: int = Field(..., ge=0, description="Hub ID of the train")
-    self_drive: int = Field(
-        ..., ge=0, le=1, description="Self-drive mode: 1=enabled, 0=disabled"
-    )
-
-    class Config:
-        json_schema_extra = {"example": {"hub_id": 12, "self_drive": 1}}
+        json_schema_extra = {"example": {"hub_id": "90:84:2B:18:28:36", "power": 50}}
 
 
 class SwitchCommand(BaseModel):
@@ -288,41 +276,6 @@ async def health_check(request: Request):
 # ===========================================
 # Train Control Endpoints (Auth required)
 # ===========================================
-
-
-@app.post(
-    "/selfdrive",
-    tags=["Train Control"],
-    summary="Toggle train self-drive mode",
-    description="Enable or disable autonomous self-drive mode for a train",
-)
-@limiter.limit("30/minute")
-async def control_train_drive(
-    request: Request, command: TrainDriveCommand, api_key: str = Depends(api_key_header)
-):
-    """Toggle train self-drive mode."""
-    await verify_api_key(api_key)
-
-    try:
-        logger.info(
-            f"Self-drive command received: hub_id={command.hub_id}, self_drive={command.self_drive}"
-        )
-        await controller.train_controller.handle_drive_command(
-            command.hub_id, command.self_drive
-        )
-        logger.info(f"Self-drive command successful for train {command.hub_id}")
-        return {
-            "status": "success",
-            "hub_id": command.hub_id,
-            "self_drive": command.self_drive,
-        }
-
-    except ValueError as e:
-        logger.warning(f"Invalid self-drive command: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Self-drive command failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post(
@@ -513,7 +466,7 @@ async def reset_bluetooth(request: Request, api_key: str = Depends(api_key_heade
     try:
         logger.warning("Bluetooth reset requested")
         await controller.switch_controller.scanner.reset_bluetooth()
-        controller.train_controller.reset_bluetooth()
+        await controller.train_controller.reset_bluetooth()
         logger.info("Bluetooth reset completed successfully")
 
         return {

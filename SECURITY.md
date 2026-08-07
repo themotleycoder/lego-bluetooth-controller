@@ -78,17 +78,13 @@ ALLOWED_ORIGINS=http://localhost:8080,capacitor://localhost,http://192.168.1.100
 All API endpoints validate input using Pydantic models:
 
 ### Train Power Validation
-- `hub_id`: Must be non-negative integer
+- `hub_id`: BLE address string of the train hub
 - `power`: Constrained to -100 to 100
 
 ### Switch Command Validation
 - `hub_id`: Must be non-negative integer
 - `switch`: Must be A, B, C, or D
 - `position`: Must be STRAIGHT or DIVERGING
-
-### Self-Drive Validation
-- `hub_id`: Must be non-negative integer
-- `self_drive`: Must be 0 or 1
 
 Invalid inputs return HTTP 400 with detailed error messages.
 

@@ -211,7 +211,7 @@ curl http://localhost:8000/health
 # Without API key (should fail)
 curl -X POST http://localhost:8000/train \
   -H "Content-Type: application/json" \
-  -d '{"hub_id": 12, "power": 50}'
+  -d '{"hub_id": "90:84:2B:18:28:36", "power": 50}'
 
 # Expected: 401 Unauthorized
 
@@ -219,24 +219,18 @@ curl -X POST http://localhost:8000/train \
 curl -X POST http://localhost:8000/train \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key-here" \
-  -d '{"hub_id": 12, "power": 50}'
+  -d '{"hub_id": "90:84:2B:18:28:36", "power": 50}'
 
-# Expected: {"status": "success", "hub_id": 12, "power": 50}
+# Expected: {"status": "success", "hub_id": "90:84:2B:18:28:36", "power": 50}
 ```
 
 ### 3. Test Train Control
 ```bash
-# Set train power
+# Set train power (hub_id is the train hub's BLE address)
 curl -X POST http://localhost:8000/train \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key-here" \
-  -d '{"hub_id": 12, "power": 75}'
-
-# Toggle self-drive
-curl -X POST http://localhost:8000/selfdrive \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your-api-key-here" \
-  -d '{"hub_id": 12, "self_drive": 1}'
+  -d '{"hub_id": "90:84:2B:18:28:36", "power": 75}'
 
 # Get connected trains
 curl -X GET http://localhost:8000/connected/trains \
@@ -290,7 +284,7 @@ MQTT_BROKER_HOST=localhost
 MQTT_BROKER_PORT=1883
 MQTT_USERNAME=your-mqtt-username
 MQTT_PASSWORD=your-mqtt-password
-TRAIN_HUB_MAPPING=TRN-A:12,TRN-B:22
+TRAIN_HUB_MAPPING=TRN-A=90:84:2B:18:28:36,TRN-B=F3:33:66:0C:3A:6A
 ```
 
 See `config.py` for the full list of `mqtt_*`/`dispatcher_*` settings (broker keepalive, topic templates, watchdog timeout, cruise power).

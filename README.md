@@ -1,6 +1,6 @@
 # lego-bluetooth-controller
 
-A Python-based controller for LEGO Technic Hubs using Bluetooth Low Energy (BLE) communication. This project allows you to control LEGO switches and trains through both a REST API and command-line interface. It supports advanced features like self-driving trains with color pattern recognition, reliable switch control, and an optional RFID-based dispatcher for fully autonomous, collision-protected multi-train operation.
+A Python-based controller for LEGO Technic Hubs using Bluetooth Low Energy (BLE) communication. This project allows you to control LEGO switches and trains through both a REST API and command-line interface. Trains are controlled over a direct GATT connection to stock LEGO hub firmware; switches use a Pybricks-based broadcast/observe protocol. It supports reliable switch control and an optional RFID-based dispatcher for fully autonomous, collision-protected multi-train operation.
 
 ## Prerequisites
 
@@ -12,8 +12,7 @@ A Python-based controller for LEGO Technic Hubs using Bluetooth Low Energy (BLE)
 - Root/sudo privileges for Bluetooth operations
 - FastAPI and uvicorn for the web service
 - Python virtual environment (recommended)
-- LEGO Technic Hubs (City Hub for trains, Technic Hub for switches)
-- LEGO Color Distance Sensor (for self-driving train functionality)
+- LEGO Technic Hubs (City Hub running stock firmware for trains, Technic Hub running Pybricks for switches)
 - *Optional, for autonomous RFID dispatch:* a Mosquitto MQTT broker, plus a Raspberry Pi Pico 2 W + MFRC522 RFID reader per train and RFID tags at track block boundaries — see [pico/README.md](pico/README.md) and the "RFID Autonomous Dispatch" section below
 
 ## Installation
@@ -34,6 +33,14 @@ A Python-based controller for LEGO Technic Hubs using Bluetooth Low Energy (BLE)
    ```bash
    pip install -r requirements.txt
    ```
+
+4. Configure environment variables:
+   ```bash
+   cp .env.example .env
+   ```
+   Edit `.env` to set your `API_KEYS`, `ALLOWED_ORIGINS`, and (if you're using
+   the optional RFID dispatcher) your MQTT broker and track wiring settings.
+   See `.env.example` for every available setting and its default.
 
 ## Running the Web Service
 
@@ -89,28 +96,35 @@ See [SYSTEMD_SERVICE_SETUP.md](SYSTEMD_SERVICE_SETUP.md) for troubleshooting, lo
 
 ## Web Service API Endpoints
 
-The web service runs on port 8000 and provides the following REST API endpoints:
+The web service runs on port 8000 and provides the following REST API endpoints.
+
+### Authentication & Rate Limiting
+
+Every endpoint except `/health` requires an `X-API-Key` header matching one of
+the comma-separated keys in `API_KEYS` (`.env`), unless `REQUIRE_AUTH=false`.
+Each endpoint is also rate-limited (per client IP); limits are noted below.
+
+```bash
+curl -X POST http://localhost:8000/train \
+  -H "X-API-Key: your-secret-api-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{"hub_id": "90:84:2B:18:28:36", "power": 40}'
+```
+
+### Health
+- `GET /health` *(no auth required, 100/minute)* - Service status, Bluetooth availability, and connected device counts.
 
 ### Train Control
-- `POST /train`
+- `POST /train` *(30/minute)* — `hub_id` is the train hub's BLE address
   ```json
   {
-    "hub_id": 0,
+    "hub_id": "90:84:2B:18:28:36",
     "power": 40  // -100 to 100
   }
   ```
 
-### Self-Driving Train Control
-- `POST /selfdrive`
-  ```json
-  {
-    "hub_id": 0,
-    "self_drive": 1  // 1 for self-drive mode, 0 for manual mode
-  }
-  ```
-
 ### Switch Control
-- `POST /switch`
+- `POST /switch` *(30/minute)*
   ```json
   {
     "hub_id": 0,
@@ -120,13 +134,12 @@ The web service runs on port 8000 and provides the following REST API endpoints:
   ```
 
 ### Status Endpoints
-- `GET /connected/trains` - List connected train hubs with detailed status information including:
-  - Current speed and direction
-  - Self-drive mode status
+- `GET /connected/trains` *(200/minute)* - List connected train hubs (keyed by BLE address) with detailed status information including:
+  - Connection state (connected/connecting/disconnected/error)
   - Connection quality (RSSI)
   - Last update timestamp
   
-- `GET /connected/switches` - List connected switch hubs with detailed information including:
+- `GET /connected/switches` *(200/minute)* - List connected switch hubs with detailed information including:
   - Current position of each switch (STRAIGHT or DIVERGING)
   - Connected motor ports
   - Command reliability statistics
@@ -134,17 +147,16 @@ The web service runs on port 8000 and provides the following REST API endpoints:
   - Last update timestamp
 
 ### System Control
-- `POST /reset` - Reset Bluetooth connections
+- `POST /reset` *(10/minute)* - Reset Bluetooth connections
 
 > **Note:** The optional RFID dispatcher (see below) does not add any REST endpoints. It runs as a background task inside the same service and drives trains/switches through the same internal controllers the API uses — manual REST commands still work but bypass the dispatcher's block protection.
 
 ## Features
 
 ### Train Control
-- Manual control with variable speed (-100 to 100)
-- Self-driving mode with color pattern recognition
-- Automatic stopping at detected color patterns
-- Support for multiple train hubs
+- Manual control with variable speed (-100 to 100) over a direct GATT connection to stock hub firmware
+- Persistent per-hub BLE connections with automatic reconnection
+- Support for multiple train hubs, addressed by BLE address
 - Real-time status monitoring and reporting
 
 ### Switch Control
@@ -181,10 +193,14 @@ The project consists of several components:
 ```
 lego-bluetooth-controller/
 ├── __init__.py
+├── .env.example                    # Environment variable template (copy to .env)
 ├── .gitignore
+├── config.py                       # pydantic-settings Settings class, loads .env
 ├── lego-bluetooth-controller.service_example  # Systemd service template (customize before use)
 ├── lego-controller.service          # Your customized service file (not in git)
+├── pytest.ini                      # Test runner + coverage config
 ├── README.md
+├── DEPLOYMENT_GUIDE.md, RASPBERRY_PI_DEPLOY.md, SECURITY.md, SYSTEMD_SERVICE_SETUP.md  # Additional docs
 ├── requirements.txt
 ├── controllers/                    # Controller logic
 │   ├── __init__.py
@@ -200,7 +216,9 @@ lego-bluetooth-controller/
 ├── hubs/                           # Code that runs on LEGO hubs
 │   ├── switch_receiver_dcmotor.py  # DCMotor-based switch control
 │   ├── switch_receiver_motor.py    # Motor-based switch control
-│   └── train_receiver.py           # Train control with color sensing
+│   └── train_receiver.py           # Legacy Pybricks train firmware (unused -- trains run stock firmware now)
+├── middleware/                     # Request middleware
+│   └── auth.py                     # X-API-Key header verification
 ├── pico/                           # MicroPython firmware for the RFID reader
 │   ├── config.example.py           # Per-train config template (copy to config.py)
 │   ├── main.py                     # WiFi/MQTT/RFID polling loop
@@ -211,9 +229,14 @@ lego-bluetooth-controller/
 │   ├── bluetooth_scanner.py        # Enhanced BLE scanning
 │   ├── lego_service.py             # Core service functionality
 │   └── main.py                     # Main controller entry point
+├── tests/                          # pytest suite (mocks all BLE/MQTT I/O)
+│   ├── conftest.py                 # Shared fixtures, test env setup
+│   ├── test_api.py, test_auth.py, test_config.py
+│   └── test_dispatcher/            # Dispatcher package tests
 ├── utils/                          # Shared utilities
 │   ├── __init__.py
-│   └── constants.py                # Shared constants
+│   ├── constants.py                # Shared constants
+│   └── logging_config.py           # Logging setup
 └── webservice/                     # API layer
     └── train_service.py            # FastAPI implementation (also starts the dispatcher)
 ```
@@ -221,11 +244,13 @@ lego-bluetooth-controller/
 ### Server Components
 - `BetterBleScanner`: Custom BLE scanner with forced cleanup and auto-recovery
 - `SwitchController`: Manages switch positions and commands with verification
-- `TrainController`: Handles train movement, speed control, and self-driving
+- `TrainController`: Handles train movement and speed control over persistent per-hub GATT connections
 - `FastAPI Web Service`: Provides REST API endpoints for remote control
+- `verify_api_key` (`middleware/auth.py`): X-API-Key header validation for mutating endpoints
+- `Settings` (`config.py`): pydantic-settings config loaded from `.env`
 
 ### Hub Components
-- `train_receiver.py`: Runs on the LEGO City Hub to control trains with color sensing
+- Train hubs run **stock LEGO Powered Up firmware** and are controlled directly over GATT by `TrainController` -- no code is uploaded to them. (`hubs/train_receiver.py` is legacy Pybricks firmware, no longer used.)
 - `switch_receiver_motor.py`: Runs on LEGO Technic Hub to control switches using Motor
 - `switch_receiver_dcmotor.py`: Runs on LEGO Technic Hub to control switches using DCMotor
 
@@ -263,23 +288,11 @@ These changes make the codebase more modular and easier to maintain, while prese
 ### Recommended Structure Improvements
 For future development, consider these additional structural improvements:
 
-1. **Configuration Management**:
-   - Add a dedicated `config/` directory for configuration files
-   - Move hardcoded constants to configuration files
-
-2. **Testing**:
-   - Add a `tests/` directory with unit and integration tests
-   - Include test fixtures for simulating hub connections
-
-3. **Documentation**:
-   - Create a `docs/` directory with detailed documentation
-   - Add inline code documentation using docstrings
-
-4. **Examples**:
+1. **Examples**:
    - Add an `examples/` directory with sample scripts
    - Include example configurations for different setups
 
-5. **Client-Server Separation**:
+2. **Client-Server Separation**:
    - Consider separating client code into a dedicated package
    - This would allow for easier distribution of client libraries
 
@@ -300,28 +313,13 @@ If you encounter issues:
 
 3. Reset Bluetooth connections:
    ```bash
-   curl -X POST http://localhost:8000/reset
+   curl -X POST http://localhost:8000/reset -H "X-API-Key: your-secret-api-key-here"
    ```
 
 4. Verify Bluetooth status:
    ```bash
    sudo hciconfig
    ```
-
-## Self-Driving Train Features
-
-The self-driving train functionality uses a LEGO Color Distance Sensor to detect colors and patterns on the track. Key features include:
-
-- Color pattern recognition (RED, YELLOW, GREEN, BLUE, GRAY, WHITE)
-- Automatic stopping at programmed color patterns
-- Forward and backward movement until pattern detection
-- Noise filtering for reliable color detection
-- Real-time status reporting during autonomous operation
-
-To use self-driving mode:
-1. Set up a track with color markers (using LEGO bricks or colored paper)
-2. Enable self-driving mode via the API
-3. The train will automatically respond to color patterns based on programmed behavior
 
 ## Error Handling and Reliability
 

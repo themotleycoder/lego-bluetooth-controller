@@ -165,19 +165,24 @@ class Settings(BaseSettings):
     )
     train_hub_mapping: str = Field(
         default="",
-        description="Comma-separated train_id:hub_id pairs, e.g. 'TRN-A:12,TRN-B:22'",
+        description=(
+            "Comma-separated train_id=hub_address pairs (hub_address is the "
+            "train hub's BLE address, since colons in the address rule out "
+            "':' as the pair delimiter), e.g. "
+            "'TRN-A=90:84:2B:18:28:36,TRN-B=F3:33:66:0C:3A:6A'"
+        ),
     )
 
     @property
-    def train_hub_mapping_dict(self) -> Dict[str, int]:
-        """Parse train_hub_mapping into a dict of train_id -> hub_id."""
-        mapping: Dict[str, int] = {}
+    def train_hub_mapping_dict(self) -> Dict[str, str]:
+        """Parse train_hub_mapping into a dict of train_id -> BLE hub address."""
+        mapping: Dict[str, str] = {}
         for pair in self.train_hub_mapping.split(","):
             pair = pair.strip()
             if not pair:
                 continue
-            train_id, _, hub_id = pair.partition(":")
-            mapping[train_id.strip()] = int(hub_id.strip())
+            train_id, _, hub_address = pair.partition("=")
+            mapping[train_id.strip()] = hub_address.strip()
         return mapping
 
     train_routes: str = Field(

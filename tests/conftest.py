@@ -66,11 +66,10 @@ def mock_lego_controller():
         # Mock train controller
         mock_instance.train_controller = MagicMock()
         mock_instance.train_controller.handle_command = AsyncMock()
-        mock_instance.train_controller.handle_drive_command = AsyncMock()
         mock_instance.train_controller.get_connected_trains = MagicMock(return_value={})
         mock_instance.train_controller.start_status_monitoring = AsyncMock()
         mock_instance.train_controller.stop_status_monitoring = AsyncMock()
-        mock_instance.train_controller.reset_bluetooth = MagicMock()
+        mock_instance.train_controller.reset_bluetooth = AsyncMock()
 
         # Mock switch controller
         mock_instance.switch_controller = MagicMock()
@@ -120,26 +119,22 @@ async def async_client(mock_lego_controller) -> AsyncGenerator:
 def sample_train_status():
     """Sample train status data for testing."""
     return {
-        12: {
-            "status": "running",
-            "speed": 50,
-            "direction": "forward",
-            "name": "Train 12",
-            "selfDrive": False,
-            "last_update_seconds_ago": 0.5,
+        "90:84:2B:18:28:36": {
+            "connected": True,
+            "state": "connected",
+            "name": "Train Hub",
             "rssi": -60,
-            "channel": 21,
+            "last_update_seconds_ago": 0.5,
+            "last_command_time": 1700000000.0,
             "active": True,
         },
-        22: {
-            "status": "stopped",
-            "speed": 0,
-            "direction": "forward",
-            "name": "Train 22",
-            "selfDrive": True,
-            "last_update_seconds_ago": 1.2,
+        "F3:33:66:0C:3A:6A": {
+            "connected": False,
+            "state": "disconnected",
+            "name": "Train Hub",
             "rssi": -55,
-            "channel": 22,
+            "last_update_seconds_ago": 1.2,
+            "last_command_time": None,
             "active": False,
         },
     }
