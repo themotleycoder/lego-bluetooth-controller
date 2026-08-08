@@ -1,12 +1,11 @@
 import asyncio
 import time
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
-from bleak import BleakClient, BleakScanner
-from bleak.backends.device import BLEDevice
+from bleak import BleakClient
 
 from servers.bluetooth_scanner import BetterBleScanner
-from utils.constants import LEGO_HUB_CHAR, LEGO_HUB_SERVICE, PORT_A
+from utils.constants import LEGO_HUB_CHAR, PORT_A
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -18,16 +17,29 @@ class TrainController:
     connection (LEGO Wireless Protocol 3.0), rather than the Pybricks
     broadcast/observe protocol used for switches.
 
-    Hubs are identified by their BLE address (e.g. "90:84:2B:18:28:36").
+    Hubs are identified by their BLE address (e.g. "90:84:2B:18:28:36") and
+    connected to directly -- no BLE discovery scan is used. A scan would
+    require its own BlueZ "StartDiscovery" session, which collides with
+    SwitchController's continuous scan on the same adapter/D-Bus connection
+    (BlueZ rejects a second concurrent discovery request from the same
+    client with "Operation already in progress", and it never recovers on
+    its own since the switch scan runs indefinitely). Connecting by known
+    address instead uses BlueZ's Connect(), which doesn't require an active
+    discovery session, so it coexists fine with switch scanning.
     """
 
-    def __init__(self, max_reconnect_attempts: int = 5, reconnect_delay: float = 3.0):
+    def __init__(
+        self,
+        known_addresses: Optional[Iterable[str]] = None,
+        max_reconnect_attempts: int = 5,
+        reconnect_delay: float = 3.0,
+    ):
         self.running = True
         self.max_reconnect_attempts = max_reconnect_attempts
         self.reconnect_delay = reconnect_delay
+        self._known_addresses = list(known_addresses or [])
 
-        # Adapter-level reset only (bluetoothctl power cycle) -- scanning
-        # for trains is done with a raw BleakScanner below, not via this.
+        # Adapter-level reset only (bluetoothctl power cycle).
         self._adapter = BetterBleScanner()
 
         self._clients: Dict[str, BleakClient] = {}
@@ -39,7 +51,6 @@ class TrainController:
         self._last_command_time: Dict[str, float] = {}
 
         self._active_trains = set()
-        self._scanner: Optional[BleakScanner] = None
 
         self.command_queue = asyncio.Queue()
         self.command_task = None
@@ -75,18 +86,19 @@ class TrainController:
     # Discovery + connection management
     # ------------------------------------------------------------------
 
-    async def _connect_hub(self, address: str, device: Optional[BLEDevice] = None):
-        """Connect to a hub and subscribe to status notifications, with retry."""
+    async def _connect_hub(self, address: str):
+        """Connect to a hub by address and subscribe to status notifications, with retry."""
         if address in self._clients or address in self._connecting:
             return
 
         self._connecting.add(address)
         self._connection_state[address] = "connecting"
+        self._hub_names.setdefault(address, "LEGO Hub")
         try:
             for attempt in range(self.max_reconnect_attempts):
                 try:
                     client = BleakClient(
-                        device or address,
+                        address,
                         disconnected_callback=lambda c, addr=address: self._on_disconnect(
                             addr
                         ),
@@ -138,47 +150,22 @@ class TrainController:
         return handler
 
     async def start_status_monitoring(self):
-        """Scan for LEGO hubs and maintain persistent GATT connections to them."""
+        """Connect to every configured train hub and keep the queue processor running."""
         logger.info("Starting train status monitoring (GATT)...")
         self.running = True
         self.command_task = asyncio.create_task(self._process_commands())
 
-        def detection_callback(device: BLEDevice, advertisement_data):
-            self._hub_names[device.address] = device.name or self._hub_names.get(
-                device.address, "LEGO Hub"
+        if not self._known_addresses:
+            logger.warning(
+                "No train hub addresses configured (TRAIN_HUB_MAPPING) -- "
+                "TrainController has nothing to connect to"
             )
-            self._hub_rssi[device.address] = advertisement_data.rssi
-            self._last_seen[device.address] = time.time()
-            self._connection_state.setdefault(device.address, "disconnected")
 
-            if (
-                device.address not in self._clients
-                and device.address not in self._connecting
-            ):
-                asyncio.create_task(self._connect_hub(device.address, device))
+        for address in self._known_addresses:
+            asyncio.create_task(self._connect_hub(address))
 
         while self.running:
-            try:
-                logger.debug("Starting train hub scanner...")
-                self._scanner = BleakScanner(
-                    detection_callback, service_uuids=[LEGO_HUB_SERVICE]
-                )
-                await self._scanner.start()
-                logger.info("Train hub scanning started")
-
-                while self.running:
-                    await asyncio.sleep(0.5)
-
-            except Exception as e:
-                logger.error(f"Error in train scanning loop: {e}", exc_info=True)
-                await asyncio.sleep(1)
-            finally:
-                if self._scanner is not None:
-                    try:
-                        await self._scanner.stop()
-                    except Exception as e:
-                        logger.warning(f"Error stopping train scanner: {e}")
-                    self._scanner = None
+            await asyncio.sleep(1)
 
     # ------------------------------------------------------------------
     # Commands
@@ -287,12 +274,6 @@ class TrainController:
                 await self.command_task
             except asyncio.CancelledError:
                 pass
-        if self._scanner is not None:
-            try:
-                await self._scanner.stop()
-            except Exception as e:
-                logger.warning(f"Error stopping train scanner: {e}")
-            self._scanner = None
         for address, client in list(self._clients.items()):
             try:
                 await client.disconnect()

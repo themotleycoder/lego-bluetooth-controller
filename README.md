@@ -136,7 +136,6 @@ curl -X POST http://localhost:8000/train \
 ### Status Endpoints
 - `GET /connected/trains` *(200/minute)* - List connected train hubs (keyed by BLE address) with detailed status information including:
   - Connection state (connected/connecting/disconnected/error)
-  - Connection quality (RSSI)
   - Last update timestamp
   
 - `GET /connected/switches` *(200/minute)* - List connected switch hubs with detailed information including:

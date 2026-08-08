@@ -2,6 +2,7 @@
 import asyncio
 import subprocess
 
+from config import get_settings
 from controllers.switch_controller import SwitchController
 from controllers.train_controller import TrainController
 
@@ -9,7 +10,8 @@ from controllers.train_controller import TrainController
 class LegoController:
     def __init__(self):
         self.switch_controller = SwitchController()
-        self.train_controller = TrainController()
+        known_addresses = get_settings().train_hub_mapping_dict.values()
+        self.train_controller = TrainController(known_addresses=known_addresses)
         self.running = True
 
     async def initialize(self):
@@ -39,14 +41,12 @@ class LegoController:
         # self.train_controller.reset_bluetooth()
 
         try:
-            # Create tasks for status monitoring. Staggered on purpose: both
-            # controllers run their own continuous BLE scan loop against the
-            # same adapter, and starting them simultaneously causes BlueZ
-            # "Operation already in progress" errors.
+            # Create tasks for status monitoring. Only the switch controller
+            # scans (continuous BLE discovery); the train controller
+            # connects directly to configured hub addresses.
             switch_monitor_task = asyncio.create_task(
                 self.switch_controller.start_status_monitoring()
             )
-            await asyncio.sleep(3)
             train_monitor_task = asyncio.create_task(
                 self.train_controller.start_status_monitoring()
             )
@@ -113,7 +113,6 @@ class LegoController:
                         switch_monitor_task = asyncio.create_task(
                             self.switch_controller.start_status_monitoring()
                         )
-                        await asyncio.sleep(3)
                         train_monitor_task = asyncio.create_task(
                             self.train_controller.start_status_monitoring()
                         )
