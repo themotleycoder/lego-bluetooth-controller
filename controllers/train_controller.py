@@ -3,6 +3,7 @@ import time
 from typing import Dict, Iterable, Optional
 
 from bleak import BleakClient
+from bleak.backends.device import BLEDevice
 
 from servers.bluetooth_scanner import BetterBleScanner
 from utils.constants import LEGO_HUB_CHAR, PORT_A
@@ -17,15 +18,20 @@ class TrainController:
     connection (LEGO Wireless Protocol 3.0), rather than the Pybricks
     broadcast/observe protocol used for switches.
 
-    Hubs are identified by their BLE address (e.g. "90:84:2B:18:28:36") and
-    connected to directly -- no BLE discovery scan is used. A scan would
-    require its own BlueZ "StartDiscovery" session, which collides with
-    SwitchController's continuous scan on the same adapter/D-Bus connection
-    (BlueZ rejects a second concurrent discovery request from the same
+    Hubs are identified by their BLE address (e.g. "90:84:2B:18:28:36").
+    TrainController does NOT run its own BLE discovery scan, and connecting
+    by bare address doesn't avoid this either -- bleak's Linux/BlueZ backend
+    triggers an implicit discovery scan internally to resolve an address it
+    doesn't already have cached, which collides with SwitchController's
+    continuous scan the exact same way an explicit scanner would (BlueZ
+    rejects a second concurrent discovery request from the same D-Bus
     client with "Operation already in progress", and it never recovers on
-    its own since the switch scan runs indefinitely). Connecting by known
-    address instead uses BlueZ's Connect(), which doesn't require an active
-    discovery session, so it coexists fine with switch scanning.
+    its own since the switch scan runs indefinitely). Instead,
+    SwitchController's already-running scan forwards every device it sees
+    to `handle_device_seen`, and configured train hubs are connected using
+    the already-resolved BLEDevice object -- no separate discovery needed.
+    See `SwitchController.set_device_seen_callback`, wired up in
+    `servers/main.py::LegoController.__init__`.
     """
 
     def __init__(
@@ -38,6 +44,7 @@ class TrainController:
         self.max_reconnect_attempts = max_reconnect_attempts
         self.reconnect_delay = reconnect_delay
         self._known_addresses = list(known_addresses or [])
+        self._known_addresses_upper = {a.upper() for a in self._known_addresses}
 
         # Adapter-level reset only (bluetoothctl power cycle).
         self._adapter = BetterBleScanner()
@@ -86,8 +93,16 @@ class TrainController:
     # Discovery + connection management
     # ------------------------------------------------------------------
 
-    async def _connect_hub(self, address: str):
-        """Connect to a hub by address and subscribe to status notifications, with retry."""
+    async def _connect_hub(self, address: str, device: Optional[BLEDevice] = None):
+        """
+        Connect to a hub and subscribe to status notifications, with retry.
+
+        `device` should be an already-discovered BLEDevice (from
+        `handle_device_seen`) whenever possible -- connecting via a bare
+        address string makes bleak resolve it with its own implicit scan,
+        which collides with SwitchController's scan. See the class
+        docstring.
+        """
         if address in self._clients or address in self._connecting:
             return
 
@@ -98,7 +113,7 @@ class TrainController:
             for attempt in range(self.max_reconnect_attempts):
                 try:
                     client = BleakClient(
-                        address,
+                        device or address,
                         disconnected_callback=lambda c, addr=address: self._on_disconnect(
                             addr
                         ),
@@ -131,12 +146,31 @@ class TrainController:
             self._connecting.discard(address)
 
     def _on_disconnect(self, address: str):
-        """Handle an unexpected hub disconnect by clearing state and reconnecting."""
+        """
+        Handle an unexpected hub disconnect by clearing state.
+
+        Reconnection happens the next time `handle_device_seen` reports this
+        address (from SwitchController's ongoing scan) -- not immediately
+        here, since connecting via a bare address without an already-seen
+        BLEDevice would trigger a colliding implicit discovery. BLE
+        advertisements are frequent, so this is normally within a second or
+        two.
+        """
         logger.warning(f"Train hub {address} disconnected")
         self._connection_state[address] = "disconnected"
         self._clients.pop(address, None)
-        if self.running:
-            asyncio.create_task(self._connect_hub(address))
+
+    def handle_device_seen(self, device: BLEDevice, advertisement_data) -> None:
+        """
+        Called for every device SwitchController's scan sees. If it's a
+        configured train hub that isn't already connected/connecting,
+        connect to it using this already-resolved BLEDevice.
+        """
+        if device.address.upper() not in self._known_addresses_upper:
+            return
+        if device.address in self._clients or device.address in self._connecting:
+            return
+        asyncio.create_task(self._connect_hub(device.address, device))
 
     def _make_notification_handler(self, address: str):
         """Build a per-hub notification callback that updates last-seen time."""
@@ -150,7 +184,12 @@ class TrainController:
         return handler
 
     async def start_status_monitoring(self):
-        """Connect to every configured train hub and keep the queue processor running."""
+        """
+        Start the command queue processor and wait for configured train hubs
+        to be connected via `handle_device_seen` (fed by SwitchController's
+        scan -- see the class docstring for why TrainController doesn't
+        scan or connect by bare address itself).
+        """
         logger.info("Starting train status monitoring (GATT)...")
         self.running = True
         self.command_task = asyncio.create_task(self._process_commands())
@@ -160,9 +199,6 @@ class TrainController:
                 "No train hub addresses configured (TRAIN_HUB_MAPPING) -- "
                 "TrainController has nothing to connect to"
             )
-
-        for address in self._known_addresses:
-            asyncio.create_task(self._connect_hub(address))
 
         while self.running:
             await asyncio.sleep(1)

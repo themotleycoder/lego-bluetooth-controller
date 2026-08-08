@@ -12,6 +12,12 @@ class LegoController:
         self.switch_controller = SwitchController()
         known_addresses = get_settings().train_hub_mapping_dict.values()
         self.train_controller = TrainController(known_addresses=known_addresses)
+        # TrainController has no scanner of its own -- it connects using
+        # devices discovered by the switch controller's scan (the only BLE
+        # discovery session in the process; see TrainController's docstring).
+        self.switch_controller.set_device_seen_callback(
+            self.train_controller.handle_device_seen
+        )
         self.running = True
 
     async def initialize(self):

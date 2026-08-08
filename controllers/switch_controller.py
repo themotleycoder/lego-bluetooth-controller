@@ -23,6 +23,15 @@ class SwitchController:
         self.command_queue = asyncio.Queue()
         self.command_task = None
         self.reliability_stats = {}  # Track success/failure for each switch
+        # Invoked for every BLE device this controller's scan sees, not just
+        # Technic Hubs -- lets TrainController piggyback on this scan to
+        # find train hubs without running its own competing BlueZ discovery
+        # session (see set_device_seen_callback).
+        self._device_seen_callback = None
+
+    def set_device_seen_callback(self, callback):
+        """Register a callback(device, advertisement_data) fired for every device this scanner sees."""
+        self._device_seen_callback = callback
 
     def decode_port_connections(self, port_connections):
         """
@@ -272,6 +281,9 @@ class SwitchController:
 
         async def status_callback(device, advertisement_data):
             try:
+                if self._device_seen_callback:
+                    self._device_seen_callback(device, advertisement_data)
+
                 if device.name and "Technic Hub" in device.name:
                     if 919 in advertisement_data.manufacturer_data:
                         data = advertisement_data.manufacturer_data[919]
