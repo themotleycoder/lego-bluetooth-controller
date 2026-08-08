@@ -39,10 +39,14 @@ class LegoController:
         # self.train_controller.reset_bluetooth()
 
         try:
-            # Create tasks for status monitoring
+            # Create tasks for status monitoring. Staggered on purpose: both
+            # controllers run their own continuous BLE scan loop against the
+            # same adapter, and starting them simultaneously causes BlueZ
+            # "Operation already in progress" errors.
             switch_monitor_task = asyncio.create_task(
                 self.switch_controller.start_status_monitoring()
             )
+            await asyncio.sleep(3)
             train_monitor_task = asyncio.create_task(
                 self.train_controller.start_status_monitoring()
             )
@@ -109,6 +113,7 @@ class LegoController:
                         switch_monitor_task = asyncio.create_task(
                             self.switch_controller.start_status_monitoring()
                         )
+                        await asyncio.sleep(3)
                         train_monitor_task = asyncio.create_task(
                             self.train_controller.start_status_monitoring()
                         )

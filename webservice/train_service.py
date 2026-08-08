@@ -119,10 +119,16 @@ async def startup_event():
         await controller.initialize()
         logger.info("Controller initialized successfully")
 
-        # Start monitoring in background tasks
+        # Start monitoring in background tasks. Staggered on purpose: both
+        # controllers run their own continuous BLE scan loop against the
+        # same adapter, and starting them simultaneously causes BlueZ
+        # "Operation already in progress" errors (the switch controller's
+        # scan start also power-cycles the adapter via reset_bluetooth,
+        # which can kill a scan the train controller just started).
         controller.running = True
-        asyncio.create_task(controller.train_controller.start_status_monitoring())
         asyncio.create_task(controller.switch_controller.start_status_monitoring())
+        await asyncio.sleep(3)
+        asyncio.create_task(controller.train_controller.start_status_monitoring())
         logger.info("Background monitoring tasks started")
 
         if dispatcher is not None:

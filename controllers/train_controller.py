@@ -21,7 +21,7 @@ class TrainController:
     Hubs are identified by their BLE address (e.g. "90:84:2B:18:28:36").
     """
 
-    def __init__(self, max_reconnect_attempts: int = 3, reconnect_delay: float = 2.0):
+    def __init__(self, max_reconnect_attempts: int = 5, reconnect_delay: float = 3.0):
         self.running = True
         self.max_reconnect_attempts = max_reconnect_attempts
         self.reconnect_delay = reconnect_delay

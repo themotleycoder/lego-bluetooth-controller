@@ -183,7 +183,7 @@ curl -X POST http://localhost:8000/train \
 - Support for multiple LEGO Technic Hubs
 - REST API for remote control
 - Systemd service integration for production deployment
-- Logging to system files (/var/log/lego-bluetooth-controller.log)
+- Structured JSON logging to stdout/stderr, or to a file via `LOG_FILE` in `.env`
 
 ## Technical Details
 
@@ -300,15 +300,16 @@ For future development, consider these additional structural improvements:
 
 If you encounter issues:
 
-1. Check the service logs:
+1. Check the service's stdout/stderr redirect paths (`StandardOutput`/`StandardError` in your systemd unit — see [SYSTEMD_SERVICE_SETUP.md](SYSTEMD_SERVICE_SETUP.md), customize the filenames to match your deployment):
+   ```bash
+   sudo tail -f /var/log/lego-controller.log
+   sudo tail -f /var/log/lego-controller.error.log
+   ```
+   Note: application logs land here, not in `journalctl`, since the unit redirects stdout/stderr directly to these files rather than to journald.
+
+2. If instead your unit doesn't redirect output (default systemd behavior), check the journal:
    ```bash
    sudo journalctl -u lego-controller -f
-   ```
-
-2. View application logs:
-   ```bash
-   sudo tail -f /var/log/lego-bluetooth-controller.log
-   sudo tail -f /var/log/lego-controller.error.log
    ```
 
 3. Reset Bluetooth connections:

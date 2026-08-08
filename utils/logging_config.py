@@ -6,6 +6,7 @@ Replaces print() statements throughout the codebase.
 """
 
 import logging
+import os
 import sys
 import json
 from datetime import datetime
@@ -132,7 +133,7 @@ def setup_logging(
     # File handler (if specified)
     if log_file:
         try:
-            file_handler = logging.FileHandler(log_file)
+            file_handler = logging.FileHandler(os.path.expanduser(log_file))
             file_handler.setLevel(numeric_level)
             file_handler.setFormatter(formatter)
             root_logger.addHandler(file_handler)
