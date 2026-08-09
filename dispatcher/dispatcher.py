@@ -167,7 +167,7 @@ class Dispatcher:
         self._track_model.mark_stopped(train_id, True)
         try:
             await self._train_controller.handle_command(train.hub_id, 0)
-        except ValueError as e:
+        except (ValueError, ConnectionError) as e:
             logger.warning(f"Could not stop train {train_id}: {e}")
 
     async def _resume_train(self, train_id: str) -> None:
@@ -180,7 +180,7 @@ class Dispatcher:
             await self._train_controller.handle_command(
                 train.hub_id, self._settings.dispatcher_cruise_power
             )
-        except ValueError as e:
+        except (ValueError, ConnectionError) as e:
             logger.warning(f"Could not resume train {train_id}: {e}")
 
     async def _resume_all_after_emergency(self) -> None:

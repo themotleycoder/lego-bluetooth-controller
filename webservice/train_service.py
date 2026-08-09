@@ -305,6 +305,9 @@ async def control_train_power(
     except ValueError as e:
         logger.warning(f"Invalid power command: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+    except ConnectionError as e:
+        logger.warning(f"Power command failed: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Power command failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

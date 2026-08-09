@@ -231,10 +231,14 @@ class TrainController:
 
     async def _execute_command(self, command):
         """Send a single motor power command over the hub's GATT connection."""
-        hub_id, power = command
+        hub_id, power, result_future = command
         client = self._clients.get(hub_id)
         if client is None or not client.is_connected:
             logger.warning(f"Cannot send command to train {hub_id}: not connected")
+            if not result_future.done():
+                result_future.set_exception(
+                    ConnectionError(f"Train {hub_id} is not connected")
+                )
             return
 
         power_byte = (256 + power) if power < 0 else power
@@ -243,31 +247,28 @@ class TrainController:
         try:
             await client.write_gatt_char(LEGO_HUB_CHAR, payload, response=True)
             self._last_command_time[hub_id] = time.time()
+            if not result_future.done():
+                result_future.set_result(None)
         except Exception as e:
             logger.error(f"Error sending motor command to {hub_id}: {e}", exc_info=True)
-            raise
+            if not result_future.done():
+                result_future.set_exception(e)
 
     async def handle_command(self, hub_id: str, power: int):
-        """Queue a power command for processing"""
-        try:
-            if hub_id not in self._connection_state:
-                available_trains = list(self._connection_state.keys())
-                raise ValueError(
-                    f"Train {hub_id} not found. Available trains: {available_trains}"
-                )
+        """Queue a power command and wait for it to actually reach the hub."""
+        if hub_id not in self._connection_state:
+            available_trains = list(self._connection_state.keys())
+            raise ValueError(
+                f"Train {hub_id} not found. Available trains: {available_trains}"
+            )
 
-            logger.info(f"Setting train {hub_id} power to: {power}%")
-            self.mark_train_active(hub_id)
-            clamped_power = max(min(power, 100), -100)
-            await self.command_queue.put((hub_id, clamped_power))
-
-            asyncio.create_task(self._mark_inactive_later(hub_id))
-
-        except ValueError:
-            raise
-        except Exception as e:
-            logger.error(f"Error queueing train command: {e}", exc_info=True)
-            raise
+        logger.info(f"Setting train {hub_id} power to: {power}%")
+        self.mark_train_active(hub_id)
+        clamped_power = max(min(power, 100), -100)
+        result_future = asyncio.get_running_loop().create_future()
+        await self.command_queue.put((hub_id, clamped_power, result_future))
+        asyncio.create_task(self._mark_inactive_later(hub_id))
+        await result_future
 
     # ------------------------------------------------------------------
     # Status
