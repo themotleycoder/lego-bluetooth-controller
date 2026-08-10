@@ -131,6 +131,19 @@ class TestTrainRegistration:
         model.mark_stopped("T1", True)
         assert model.is_moving("T1") is False
 
+    def test_self_drive_defaults_off_and_is_toggleable(self):
+        model = self._build()
+        assert model.is_self_drive("T1") is False
+        model.set_self_drive("T1", True)
+        assert model.is_self_drive("T1") is True
+        model.set_self_drive("T1", False)
+        assert model.is_self_drive("T1") is False
+
+    def test_train_id_for_hub_id(self):
+        model = self._build()
+        assert model.train_id_for_hub_id("90:84:2B:18:28:36") == "T1"
+        assert model.train_id_for_hub_id("nonexistent") is None
+
 
 class TestChainAdvancement:
     def _build(self) -> TrackModel:

@@ -59,6 +59,12 @@ class Dispatcher:
         self._emergency_train_id: Optional[str] = None
         self._pending_chain: Dict[str, List[Edge]] = {}
 
+    @property
+    def track_model(self) -> TrackModel:
+        """Expose the track model read-only for callers outside the dispatcher
+        (e.g. the REST layer resolving a hub_id to a train_id)."""
+        return self._track_model
+
     async def run(self) -> None:
         """Start the MQTT bridge and process tag events until `stop()`."""
         await self._bridge.start()
@@ -135,6 +141,8 @@ class Dispatcher:
         self, train_id: str, chain: Optional[List[Edge]]
     ) -> None:
         """Try to move `train_id` onto `chain`; stop it if that isn't possible."""
+        if not self._track_model.is_self_drive(train_id):
+            return
         if not chain:
             return
 
@@ -158,6 +166,37 @@ class Dispatcher:
         self._track_model.grant_pending_chain(train_id, chain)
         self._pending_chain.pop(train_id, None)
         await self._resume_train(train_id)
+
+    async def set_self_drive(self, train_id: str, enabled: bool) -> bool:
+        """
+        Enable or disable automatic dispatcher control of a single train.
+
+        Enabling immediately attempts to advance the train onto its next
+        block chain, the same way a stalled train resumes after an
+        emergency-stop auto-clears -- otherwise it would just sit stationary
+        until a tag it can no longer reach. Disabling stops the train right
+        away and releases every block it currently holds (it may hold blocks
+        from several past chain-grants, not just the most recent one), so
+        other self-driving trains waiting on those blocks can proceed.
+
+        Returns False if train_id isn't a registered train.
+        """
+        if train_id not in self._track_model.trains:
+            return False
+
+        self._track_model.set_self_drive(train_id, enabled)
+
+        if enabled:
+            chain = self._track_model.next_block_chain_for_train(train_id)
+            await self._attempt_advance(train_id, chain)
+        else:
+            await self._stop_train(train_id)
+            retry_trains = await self._block_manager.release_all(train_id)
+            for retry_train in retry_trains:
+                retry_chain = self._track_model.next_block_chain_for_train(retry_train)
+                await self._attempt_advance(retry_train, retry_chain)
+
+        return True
 
     async def _stop_train(self, train_id: str) -> None:
         """Stop a train and mark it as intentionally stopped."""

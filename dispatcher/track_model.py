@@ -167,6 +167,7 @@ class TrackModel:
         self._train_route_index: dict[str, int] = {}
         self._train_stopped: dict[str, bool] = {}
         self._train_last_tag_time: dict[str, float] = {}
+        self._train_self_drive: dict[str, bool] = {}
         # Edges granted to a train but not yet confirmed cleared by a tag read,
         # in route order. See TrackModel.next_block_chain_for_train.
         self._pending_edges: dict[str, list[Edge]] = {}
@@ -477,6 +478,7 @@ class TrackModel:
         self._train_route_index[train_id] = 0
         self._pending_edges[train_id] = []
         self._train_stopped[train_id] = True
+        self._train_self_drive[train_id] = False
 
     def mark_tag_seen(self, train_id: str, timestamp: float) -> None:
         """Record that a train reported a tag at `timestamp`, for watchdog timing."""
@@ -498,6 +500,21 @@ class TrackModel:
     def is_moving(self, train_id: str) -> bool:
         """True once a train has been explicitly marked as not stopped."""
         return not self._train_stopped.get(train_id, True)
+
+    def set_self_drive(self, train_id: str, enabled: bool) -> None:
+        """Record whether the dispatcher may automatically advance this train."""
+        self._train_self_drive[train_id] = enabled
+
+    def is_self_drive(self, train_id: str) -> bool:
+        """True only once self-drive has been explicitly enabled for this train."""
+        return self._train_self_drive.get(train_id, False)
+
+    def train_id_for_hub_id(self, hub_id: str) -> Optional[str]:
+        """Reverse-lookup a train_id from its BLE hub address, or None if unregistered."""
+        for train in self.trains.values():
+            if train.hub_id == hub_id:
+                return train.id
+        return None
 
     def hops_to_switch(self, train_id: str, target_switch: str) -> int:
         """Route-hops from a train's current position to target_switch (for contention)."""

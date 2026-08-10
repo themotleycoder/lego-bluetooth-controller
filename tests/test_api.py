@@ -4,6 +4,8 @@ Integration tests for API endpoints.
 Tests FastAPI endpoints with mocked controllers and authentication.
 """
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 from fastapi import status
 
@@ -132,6 +134,72 @@ class TestTrainControlEndpoints:
             headers={"X-API-Key": test_api_key},
         )
         assert response.status_code == status.HTTP_200_OK
+
+
+class TestSelfDriveEndpoint:
+    """Test suite for the /selfdrive endpoint."""
+
+    def test_selfdrive_without_auth(self, client):
+        """Test self-drive endpoint rejects requests without API key."""
+        response = client.post(
+            "/selfdrive", json={"hub_id": "90:84:2B:18:28:36", "self_drive": 1}
+        )
+
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_selfdrive_validation_rejects_out_of_range(self, client, test_api_key):
+        """Test self_drive must be 0 or 1."""
+        response = client.post(
+            "/selfdrive",
+            json={"hub_id": "90:84:2B:18:28:36", "self_drive": 2},
+            headers={"X-API-Key": test_api_key},
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_selfdrive_dispatcher_disabled(self, client, test_api_key):
+        """Test self-drive returns 503 when the dispatcher isn't running (default test env)."""
+        response = client.post(
+            "/selfdrive",
+            json={"hub_id": "90:84:2B:18:28:36", "self_drive": 1},
+            headers={"X-API-Key": test_api_key},
+        )
+
+        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+
+    def test_selfdrive_unknown_hub(self, client, test_api_key):
+        """Test self-drive returns 404 for a hub with no registered train."""
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.track_model.train_id_for_hub_id.return_value = None
+
+        with patch("webservice.train_service.dispatcher", mock_dispatcher):
+            response = client.post(
+                "/selfdrive",
+                json={"hub_id": "90:84:2B:18:28:36", "self_drive": 1},
+                headers={"X-API-Key": test_api_key},
+            )
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_selfdrive_success(self, client, test_api_key):
+        """Test self-drive succeeds and forwards the resolved train_id to the dispatcher."""
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.track_model.train_id_for_hub_id.return_value = "TRN-A"
+        mock_dispatcher.set_self_drive = AsyncMock(return_value=True)
+
+        with patch("webservice.train_service.dispatcher", mock_dispatcher):
+            response = client.post(
+                "/selfdrive",
+                json={"hub_id": "90:84:2B:18:28:36", "self_drive": 1},
+                headers={"X-API-Key": test_api_key},
+            )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["status"] == "success"
+        assert data["hub_id"] == "90:84:2B:18:28:36"
+        assert data["self_drive"] is True
+        mock_dispatcher.set_self_drive.assert_awaited_with("TRN-A", True)
 
 
 class TestSwitchControlEndpoints:

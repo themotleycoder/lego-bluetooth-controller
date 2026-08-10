@@ -52,6 +52,11 @@ def build_two_train_model() -> TrackModel:
     model.configure_switch_wiring("A", hub_id=1, port_name="SWITCH_A")
     model.register_train("TRN-A", hub_id=TRN_A_HUB, route=["A", "H"])
     model.register_train("TRN-B", hub_id=TRN_B_HUB, route=["A", "H"])
+    # Self-drive defaults to off; these existing tests exercise automatic
+    # dispatcher-driven movement, so opt both trains in explicitly (mirrors
+    # what checking "Self Drive" in the UI does for a real train).
+    model.set_self_drive("TRN-A", True)
+    model.set_self_drive("TRN-B", True)
     return model
 
 
@@ -183,6 +188,77 @@ class TestTagEventHandling:
         await dispatcher._handle_tag_event(TagEvent("TRN-A", "NOPE", 1.0))
 
         train_controller.handle_command.assert_not_awaited()
+
+
+class TestSelfDrive:
+    async def test_train_with_self_drive_off_does_not_advance_on_tag_event(self):
+        (
+            dispatcher,
+            model,
+            bridge,
+            train_controller,
+            switch_controller,
+        ) = build_dispatcher()
+        model.set_self_drive("TRN-A", False)
+
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))
+
+        train_controller.handle_command.assert_not_awaited()
+
+    async def test_enabling_self_drive_immediately_attempts_to_advance(self):
+        (
+            dispatcher,
+            model,
+            bridge,
+            train_controller,
+            switch_controller,
+        ) = build_dispatcher()
+        model.set_self_drive("TRN-A", False)
+        train_controller.handle_command.reset_mock()
+
+        result = await dispatcher.set_self_drive("TRN-A", True)
+
+        assert result is True
+        assert model.is_self_drive("TRN-A") is True
+        train_controller.handle_command.assert_awaited_with(
+            TRN_A_HUB, dispatcher._settings.dispatcher_cruise_power
+        )
+
+    async def test_disabling_self_drive_stops_the_train_and_releases_its_blocks(self):
+        (
+            dispatcher,
+            model,
+            bridge,
+            train_controller,
+            switch_controller,
+        ) = build_dispatcher()
+
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))  # holds BLK_AH
+        await dispatcher._handle_tag_event(TagEvent("TRN-B", "1", 1.0))  # queued
+        train_controller.handle_command.reset_mock()
+
+        result = await dispatcher.set_self_drive("TRN-A", False)
+
+        assert result is True
+        assert model.is_self_drive("TRN-A") is False
+        # TRN-A stopped, and TRN-B (queued behind it) got the block instead.
+        train_controller.handle_command.assert_any_await(TRN_A_HUB, 0)
+        train_controller.handle_command.assert_any_await(
+            TRN_B_HUB, dispatcher._settings.dispatcher_cruise_power
+        )
+
+    async def test_set_self_drive_for_unknown_train_returns_false(self):
+        (
+            dispatcher,
+            model,
+            bridge,
+            train_controller,
+            switch_controller,
+        ) = build_dispatcher()
+
+        result = await dispatcher.set_self_drive("GHOST", True)
+
+        assert result is False
 
 
 class TestWatchdog:

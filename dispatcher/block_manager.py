@@ -106,6 +106,36 @@ class BlockManager:
                 winner = candidate
         return winner
 
+    def _release_block(
+        self, block_id: str, train_id: str, edge: Optional[Edge] = None
+    ) -> Optional[str]:
+        """
+        Free `block_id` if held by `train_id`, returning the next queued
+        train_id to retry entry, if any (removed from the pending queue).
+
+        `edge` is used for contention resolution among queued trains; if not
+        given (e.g. releasing by block_id alone), an arbitrary edge sharing
+        the block is used instead -- any edge on a block is an equally valid
+        reference point for "how far away is this train from this block".
+        """
+        if self._reserved_by.get(block_id) == train_id:
+            del self._reserved_by[block_id]
+        self._track_model.free_block(block_id)
+
+        pending = self._pending.get(block_id)
+        if not pending:
+            return None
+
+        if edge is None:
+            block = self._track_model.blocks.get(block_id)
+            if not block or not block.edge_ids:
+                return None
+            edge = self._track_model.edges[block.edge_ids[0]]
+
+        winner = self._select_next_pending(pending, edge)
+        pending.remove(winner)
+        return winner
+
     async def release(self, train_id: str, chain: List[Edge]) -> List[str]:
         """
         Release every block in `chain` previously held by `train_id`.
@@ -117,17 +147,29 @@ class BlockManager:
         for edge in chain:
             if not edge.block:
                 continue
-            if self._reserved_by.get(edge.block) == train_id:
-                del self._reserved_by[edge.block]
-            self._track_model.free_block(edge.block)
+            winner = self._release_block(edge.block, train_id, edge)
+            if winner and winner not in retries:
+                retries.append(winner)
+        return retries
 
-            pending = self._pending.get(edge.block)
-            if not pending:
-                continue
+    async def release_all(self, train_id: str) -> List[str]:
+        """
+        Release every block currently held by `train_id`, regardless of
+        which chain granted it -- used when a train is pulled off self-drive
+        control and may be holding blocks from several past chain-grants.
 
-            winner = self._select_next_pending(pending, edge)
-            pending.remove(winner)
-            if winner not in retries:
+        Returns the (deduplicated) list of queued train_ids, if any, that
+        should retry entry now that their blocks are free.
+        """
+        retries: List[str] = []
+        held_blocks = [
+            block_id
+            for block_id, owner in self._reserved_by.items()
+            if owner == train_id
+        ]
+        for block_id in held_blocks:
+            winner = self._release_block(block_id, train_id)
+            if winner and winner not in retries:
                 retries.append(winner)
         return retries
 

@@ -168,6 +168,20 @@ class TrainPowerCommand(BaseModel):
         json_schema_extra = {"example": {"hub_id": "90:84:2B:18:28:36", "power": 50}}
 
 
+class SelfDriveCommand(BaseModel):
+    """Command to enable/disable autonomous dispatcher control of a train."""
+
+    hub_id: str = Field(..., description="BLE address of the train hub")
+    self_drive: int = Field(
+        ..., ge=0, le=1, description="Enable (1) or disable (0) self-drive"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {"hub_id": "90:84:2B:18:28:36", "self_drive": 1}
+        }
+
+
 class SwitchCommand(BaseModel):
     """Command to control track switch position."""
 
@@ -314,6 +328,49 @@ async def control_train_power(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post(
+    "/selfdrive",
+    tags=["Train Control"],
+    summary="Toggle autonomous dispatcher control",
+    description="Enable or disable RFID-dispatcher-driven autonomous movement for a train",
+)
+@limiter.limit("30/minute")
+async def control_self_drive(
+    request: Request, command: SelfDriveCommand, api_key: str = Depends(api_key_header)
+):
+    """Enable or disable autonomous dispatcher control of a train."""
+    await verify_api_key(api_key)
+
+    if dispatcher is None:
+        raise HTTPException(status_code=503, detail="Dispatcher is not enabled")
+
+    train_id = dispatcher.track_model.train_id_for_hub_id(command.hub_id)
+    if train_id is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No train registered for hub {command.hub_id}",
+        )
+
+    try:
+        enabled = bool(command.self_drive)
+        logger.info(
+            f"Self-drive command received: hub_id={command.hub_id}, enabled={enabled}"
+        )
+        await dispatcher.set_self_drive(train_id, enabled)
+        logger.info(
+            f"Self-drive {'enabled' if enabled else 'disabled'} for train {train_id}"
+        )
+        return {
+            "status": "success",
+            "hub_id": command.hub_id,
+            "self_drive": enabled,
+        }
+
+    except Exception as e:
+        logger.error(f"Self-drive command failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ===========================================
 # Switch Control Endpoints (Auth required)
 # ===========================================
@@ -400,6 +457,17 @@ async def get_connected_trains(
             )
 
         connected_trains = controller.train_controller.get_connected_trains()
+        for address, train_data in connected_trains.items():
+            train_id = (
+                dispatcher.track_model.train_id_for_hub_id(address)
+                if dispatcher is not None
+                else None
+            )
+            train_data["self_drive"] = (
+                dispatcher.track_model.is_self_drive(train_id)
+                if train_id is not None
+                else False
+            )
         logger.debug(f"Retrieved {len(connected_trains)} connected trains")
 
         return {
