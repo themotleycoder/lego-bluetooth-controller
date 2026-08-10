@@ -143,6 +143,7 @@ async def shutdown_event():
     logger.info("Shutting down LEGO Train Controller API service")
     try:
         controller.running = False
+        await controller.switch_controller.stop_status_monitoring()
         await controller.train_controller.stop_status_monitoring()
         if dispatcher is not None:
             await dispatcher.stop()
