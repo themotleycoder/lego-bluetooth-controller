@@ -1,13 +1,18 @@
 from pybricks.hubs import TechnicHub
 from pybricks.pupdevices import Motor
-from pybricks.parameters import Port, Color
+from pybricks.parameters import Port, Color, Stop
 from pybricks.tools import wait
 from usys import stdin, stdout
 from uselect import poll
 
-# Motor constants
-MOTOR_POWER = 60  # Power in %
-L_MOVE_TIME = 130  # Time in ms for L motors (Motor)
+# Motor constants. Position is driven to an absolute angle (not a timed
+# power pulse) so it reliably completes the full throw every time instead
+# of sometimes falling short -- STRAIGHT is always 0 degrees (the angle
+# each motor is zeroed to at startup, see reset_angle below), DIVERGING is
+# always MOTOR_ANGLE degrees from there. Tune MOTOR_ANGLE to match the
+# physical switch mechanism's actual throw.
+MOTOR_SPEED = 500  # deg/s
+MOTOR_ANGLE = 40  # degrees of rotation for DIVERGING
 
 # Initialize hub. Commands/status now travel over the Pybricks GATT
 # connection (stdin/stdout) instead of broadcast/observe -- see
@@ -31,6 +36,7 @@ active_ports = []
 for port, port_name in zip([Port.A, Port.B, Port.C, Port.D], ["A", "B", "C", "D"]):
     try:
         motor = Motor(port)
+        motor.reset_angle(0)  # this startup position is STRAIGHT (angle 0)
         motors[port_name] = motor
         active_ports.append(port_name)
     except Exception:
@@ -53,11 +59,8 @@ def port_connections_bitmap():
 
 def set_switch_position(motor, switch_name, position):
     """Set switch position using motor and update tracking"""
-    power = MOTOR_POWER
-    move_time = L_MOVE_TIME
-    motor.dc(power if position else -power)
-    wait(move_time)
-    motor.brake()
+    target_angle = MOTOR_ANGLE if position else 0
+    motor.run_target(MOTOR_SPEED, target_angle, then=Stop.HOLD, wait=True)
 
     # Update position tracking
     switch_positions[switch_name] = position
