@@ -10,8 +10,11 @@ from uselect import poll
 # of sometimes falling short -- STRAIGHT is always 0 degrees (the angle
 # each motor is zeroed to at startup, see reset_angle below), DIVERGING is
 # always MOTOR_ANGLE degrees from there. Tune MOTOR_ANGLE to match the
-# physical switch mechanism's actual throw.
-MOTOR_SPEED = 500  # deg/s
+# physical switch mechanism's actual throw. MOTOR_SPEED intentionally low:
+# too high a speed target makes the position controller chase the speed
+# under load instead of applying steady torque into the turn, so it
+# strains without completing the throw.
+MOTOR_SPEED = 150  # deg/s
 MOTOR_ANGLE = 40  # degrees of rotation for DIVERGING
 
 # Initialize hub. Commands/status now travel over the Pybricks GATT
