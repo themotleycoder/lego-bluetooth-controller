@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 import asyncio
+import re
 import struct
 import time
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
 from bleak import BleakClient
 from bleak.backends.device import BLEDevice
@@ -11,12 +12,15 @@ from servers.bluetooth_scanner import BetterBleScanner
 from utils.constants import (
     PYBRICKS_COMMAND_EVENT_CHAR,
     PYBRICKS_HUB_CAPABILITIES_CHAR,
+    PYBRICKS_SERVICE,
     PybricksCommand,
     PybricksEvent,
 )
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+_NAME_PATTERN = re.compile(r"^switch-(\d+)$", re.IGNORECASE)
 
 
 class SwitchController:
@@ -30,12 +34,16 @@ class SwitchController:
     hubs/switch_receiver_*.py for the hub-side stdin/stdout loop this talks
     to.
 
-    Switch hubs are identified throughout the public API/dispatcher by an
-    integer hub_id (the old broadcast-channel id, kept for backwards
-    compatibility) which is resolved to a BLE address via `hub_mapping`
-    (Settings.switch_hub_mapping) -- unlike TrainController, which uses the
-    BLE address as the hub's public identity directly, since one switch
-    hub_id can have multiple switches wired to its ports.
+    Unlike TrainController (stock LEGO firmware, fixed public BLE address),
+    Pybricks hubs advertise a *rotating* BLE address that changes on every
+    power-on -- confirmed against real hardware, where the same physical
+    hub showed three different addresses across a firmware reflash and two
+    power cycles. So switch hubs can't be identified by a configured
+    address the way trains are. Instead, each hub is given a stable name
+    at flash time (`switch-<hub_id>`, e.g. "switch-4"), and hub_id is
+    parsed from that name when the hub is discovered. All internal state
+    is keyed by hub_id, not address; a hub's BleakClient is looked up
+    fresh from whatever address it's currently advertising on.
 
     SwitchController owns the process's single continuous BLE discovery
     scan (self.scanner) -- TrainController has no scanner of its own and
@@ -47,7 +55,7 @@ class SwitchController:
 
     def __init__(
         self,
-        hub_mapping: Optional[Dict[int, str]] = None,
+        known_hub_ids: Optional[Iterable[int]] = None,
         max_reconnect_attempts: int = 5,
         reconnect_delay: float = 3.0,
     ):
@@ -55,15 +63,15 @@ class SwitchController:
         self.max_reconnect_attempts = max_reconnect_attempts
         self.reconnect_delay = reconnect_delay
 
-        self._hub_mapping: Dict[int, str] = dict(hub_mapping or {})
-        self._address_to_hub_id: Dict[str, int] = {
-            address.upper(): hub_id for hub_id, address in self._hub_mapping.items()
-        }
+        # If given, only these hub_ids are connected to -- anything else
+        # matching the switch-<id> naming convention is ignored. If empty,
+        # any switch-<id> hub is accepted.
+        self._known_hub_ids = set(known_hub_ids) if known_hub_ids else None
 
         self.scanner = BetterBleScanner()
 
-        self._clients: Dict[str, BleakClient] = {}  # address -> client
-        self._connecting: set = set()  # addresses currently connecting
+        self._clients: Dict[int, BleakClient] = {}  # hub_id -> client
+        self._connecting: set = set()  # hub_ids currently connecting
         self._connection_state: Dict[int, str] = {}  # hub_id -> state
 
         self.switch_statuses: Dict[int, dict] = {}
@@ -115,6 +123,24 @@ class SwitchController:
     # Discovery + connection management
     # ------------------------------------------------------------------
 
+    def _hub_id_from_advertisement(
+        self, device: BLEDevice, advertisement_data
+    ) -> Optional[int]:
+        """Return the hub_id encoded in a switch-<id> device name, or None."""
+        service_uuids = [u.lower() for u in (advertisement_data.service_uuids or [])]
+        if PYBRICKS_SERVICE.lower() not in service_uuids:
+            return None
+
+        name = device.name or advertisement_data.local_name
+        match = _NAME_PATTERN.match(name) if name else None
+        if not match:
+            return None
+
+        hub_id = int(match.group(1))
+        if self._known_hub_ids is not None and hub_id not in self._known_hub_ids:
+            return None
+        return hub_id
+
     def handle_device_seen(self, device: BLEDevice, advertisement_data) -> None:
         """
         Called for every device the shared scan sees. Forwards to any
@@ -127,86 +153,84 @@ class SwitchController:
         if self._device_seen_callback:
             self._device_seen_callback(device, advertisement_data)
 
-        address_upper = device.address.upper()
-        if address_upper not in self._address_to_hub_id:
+        hub_id = self._hub_id_from_advertisement(device, advertisement_data)
+        if hub_id is None:
             return
-        if device.address in self._clients or device.address in self._connecting:
+        if hub_id in self._clients or hub_id in self._connecting:
             return
-        asyncio.create_task(self._connect_hub(device.address, device))
+        asyncio.create_task(self._connect_hub(hub_id, device))
 
-    async def _connect_hub(self, address: str, device: Optional[BLEDevice] = None):
+    async def _connect_hub(self, hub_id: int, device: BLEDevice):
         """Connect to a switch hub, verify Pybricks protocol support, and start its program."""
-        if address in self._clients or address in self._connecting:
+        if hub_id in self._clients or hub_id in self._connecting:
             return
 
-        hub_id = self._address_to_hub_id.get(address.upper())
-        self._connecting.add(address)
-        if hub_id is not None:
-            self._connection_state[hub_id] = "connecting"
+        self._connecting.add(hub_id)
+        self._connection_state[hub_id] = "connecting"
         try:
             for attempt in range(self.max_reconnect_attempts):
                 try:
                     client = BleakClient(
-                        device or address,
-                        disconnected_callback=lambda c, addr=address: self._on_disconnect(
-                            addr
+                        device,
+                        disconnected_callback=lambda c, hid=hub_id: self._on_disconnect(
+                            hid
                         ),
                     )
                     await client.connect()
 
-                    if not await self._prepare_hub(client, address):
+                    if not await self._prepare_hub(client, hub_id):
                         await client.disconnect()
                         raise RuntimeError("Hub capability check failed")
 
-                    self._clients[address] = client
-                    if hub_id is not None:
-                        self._connection_state[hub_id] = "connected"
-                    logger.info(f"Connected to switch hub {address} (hub_id={hub_id})")
+                    self._clients[hub_id] = client
+                    self._connection_state[hub_id] = "connected"
+                    logger.info(f"Connected to switch hub {hub_id} ({device.address})")
                     return
 
                 except Exception as e:
                     logger.warning(
                         f"Connect attempt {attempt + 1}/{self.max_reconnect_attempts} "
-                        f"failed for switch hub {address}: {e}"
+                        f"failed for switch hub {hub_id}: {e}"
                     )
                     if attempt < self.max_reconnect_attempts - 1:
                         await asyncio.sleep(self.reconnect_delay)
 
-            if hub_id is not None:
-                self._connection_state[hub_id] = "error"
+            self._connection_state[hub_id] = "error"
             logger.error(
-                f"Failed to connect to switch hub {address} after "
+                f"Failed to connect to switch hub {hub_id} after "
                 f"{self.max_reconnect_attempts} attempts"
             )
         finally:
-            self._connecting.discard(address)
+            self._connecting.discard(hub_id)
 
-    async def _prepare_hub(self, client: BleakClient, address: str) -> bool:
+    async def _prepare_hub(self, client: BleakClient, hub_id: int) -> bool:
         """Confirm Pybricks protocol support, subscribe to status, start the hub's program."""
         try:
             capabilities = await client.read_gatt_char(PYBRICKS_HUB_CAPABILITIES_CHAR)
         except Exception as e:
-            logger.error(f"Could not read hub capabilities for {address}: {e}")
+            logger.error(
+                f"Could not read hub capabilities for switch hub {hub_id}: {e}"
+            )
             return False
 
         # max_char_size is the first field in both the v1.2 (<HII, 8 bytes)
         # and v1.5 (<HIIB, 11 bytes) Hub Capabilities layouts.
         if len(capabilities) < 8:
             logger.error(
-                f"Unexpected hub capabilities payload for {address}: {capabilities!r}"
+                f"Unexpected hub capabilities payload for switch hub {hub_id}: {capabilities!r}"
             )
             return False
         max_char_size = struct.unpack("<H", capabilities[:2])[0]
 
         if max_char_size < 2:
             logger.error(
-                f"Switch hub {address} max_char_size ({max_char_size}) too small "
+                f"Switch hub {hub_id} max_char_size ({max_char_size}) too small "
                 f"for the 2-byte switch command payload"
             )
             return False
 
         await client.start_notify(
-            PYBRICKS_COMMAND_EVENT_CHAR, self._make_notification_handler(address)
+            PYBRICKS_COMMAND_EVENT_CHAR, self._make_notification_handler(hub_id)
         )
 
         try:
@@ -217,26 +241,24 @@ class SwitchController:
             )
         except Exception as e:
             # BUSY (program already running) is expected here and harmless.
-            logger.debug(f"START_USER_PROGRAM for {address}: {e}")
+            logger.debug(f"START_USER_PROGRAM for switch hub {hub_id}: {e}")
 
         return True
 
-    def _on_disconnect(self, address: str):
+    def _on_disconnect(self, hub_id: int):
         """
         Handle an unexpected hub disconnect by clearing state. Reconnection
-        happens the next time `handle_device_seen` reports this address
-        (from the ongoing scan), not immediately here -- see
-        TrainController's equivalent for why.
+        happens the next time `handle_device_seen` reports this hub_id
+        (from the ongoing scan, likely on a new BLE address since Pybricks
+        rotates addresses on power-on) -- see TrainController's equivalent
+        for why we don't reconnect immediately here.
         """
-        hub_id = self._address_to_hub_id.get(address.upper())
-        logger.warning(f"Switch hub {address} (hub_id={hub_id}) disconnected")
-        if hub_id is not None:
-            self._connection_state[hub_id] = "disconnected"
-        self._clients.pop(address, None)
+        logger.warning(f"Switch hub {hub_id} disconnected")
+        self._connection_state[hub_id] = "disconnected"
+        self._clients.pop(hub_id, None)
 
-    def _make_notification_handler(self, address: str):
+    def _make_notification_handler(self, hub_id: int):
         """Build a per-hub notification callback decoding Pybricks Command/Event frames."""
-        hub_id = self._address_to_hub_id.get(address.upper())
 
         def handler(_sender, data: bytearray):
             if not data:
@@ -245,13 +267,13 @@ class SwitchController:
             if event_id == PybricksEvent.WRITE_STDOUT:
                 self._handle_stdout(hub_id, payload)
             elif event_id == PybricksEvent.STATUS_REPORT:
-                logger.debug(f"Switch hub {address} status report: {payload!r}")
+                logger.debug(f"Switch hub {hub_id} status report: {payload!r}")
 
         return handler
 
-    def _handle_stdout(self, hub_id: Optional[int], payload: bytes):
+    def _handle_stdout(self, hub_id: int, payload: bytes):
         """Decode a 2-byte [status_byte, port_connections] status frame from the hub."""
-        if hub_id is None or len(payload) < 2:
+        if len(payload) < 2:
             return
 
         status_byte, port_connections = payload[0], payload[1]
@@ -315,13 +337,9 @@ class SwitchController:
 
     async def _send_command(self, hub_id, switch_name, position):
         """Write a WRITE_STDIN command carrying the switch payload, acked (response=True)."""
-        address = self._hub_mapping.get(hub_id)
-        if address is None:
-            raise ValueError(f"No BLE address configured for switch hub_id {hub_id}")
-
-        client = self._clients.get(address)
+        client = self._clients.get(hub_id)
         if client is None or not client.is_connected:
-            raise ConnectionError(f"Switch hub {hub_id} ({address}) is not connected")
+            raise ConnectionError(f"Switch hub {hub_id} is not connected")
 
         payload = self.encode_switch_command(switch_name, position)
         await client.write_gatt_char(
@@ -364,12 +382,6 @@ class SwitchController:
         logger.info("Starting switch status monitoring...")
         self.running = True
 
-        if not self._hub_mapping:
-            logger.warning(
-                "No switch hub addresses configured (SWITCH_HUB_MAPPING) -- "
-                "SwitchController has nothing to connect to"
-            )
-
         while self.running:
             try:
                 logger.debug("Setting up scanner...")
@@ -391,9 +403,8 @@ class SwitchController:
         connected_switches = {}
         current_time = time.time()
 
-        for hub_id, address in self._hub_mapping.items():
-            client = self._clients.get(address)
-            if client is None or not client.is_connected:
+        for hub_id, client in self._clients.items():
+            if not client.is_connected:
                 continue
 
             status = self.switch_statuses.get(hub_id, {})
@@ -432,10 +443,10 @@ class SwitchController:
         logger.info("Stopping switch status monitoring...")
         self.running = False
         await self.scanner.stop_scan()
-        for address, client in list(self._clients.items()):
+        for hub_id, client in list(self._clients.items()):
             try:
                 await client.disconnect()
             except Exception as e:
-                logger.warning(f"Error disconnecting {address}: {e}")
+                logger.warning(f"Error disconnecting switch hub {hub_id}: {e}")
         self._clients.clear()
         logger.info("Switch monitor stopped")
