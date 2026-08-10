@@ -186,8 +186,8 @@ class TrackModel:
         self._build_adjacency()
 
     def _build_switches(self) -> None:
-        motorized = ["A", "B", "C", "F", "H", "I", "J"]
-        manual = ["D", "E", "G"]
+        motorized = ["A", "C", "E", "F", "H", "I", "J"]
+        manual = ["B", "D", "G"]
         for sid in motorized:
             self.switches[sid] = Switch(id=sid, switch_type=SwitchType.MOTORIZED)
         for sid in manual:

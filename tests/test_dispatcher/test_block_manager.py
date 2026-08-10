@@ -177,7 +177,7 @@ class TestSetSwitchesForChain:
     async def test_manual_switches_are_not_actuated(self):
         model = build_model()
         bm = BlockManager(model)
-        chain = [model.edges["ED"]]  # E and D are both manual switches
+        chain = [model.edges["DG"]]  # D and G are both manual switches
         switch_controller = AsyncMock()
 
         result = await bm.set_switches_for_chain(chain, switch_controller)
