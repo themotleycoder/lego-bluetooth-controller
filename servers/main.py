@@ -9,7 +9,8 @@ from controllers.train_controller import TrainController
 
 class LegoController:
     def __init__(self):
-        self.switch_controller = SwitchController()
+        switch_hub_mapping = get_settings().switch_hub_mapping_dict
+        self.switch_controller = SwitchController(hub_mapping=switch_hub_mapping)
         known_addresses = get_settings().train_hub_mapping_dict.values()
         self.train_controller = TrainController(known_addresses=known_addresses)
         # TrainController has no scanner of its own -- it connects using

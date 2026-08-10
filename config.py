@@ -207,6 +207,30 @@ class Settings(BaseSettings):
                 routes[train_id.strip()] = switch_ids
         return routes
 
+    switch_hub_mapping: str = Field(
+        default="",
+        description=(
+            "Comma-separated hub_id=hub_address pairs (hub_address is the "
+            "switch hub's BLE address, since colons in the address rule out "
+            "':' as the pair delimiter), e.g. "
+            "'11=90:84:2B:AA:BB:CC,12=F3:33:66:11:22:33'. hub_id here is the "
+            "same logical id used in switch_wiring below -- one physical "
+            "switch hub (up to 4 ports) per hub_id."
+        ),
+    )
+
+    @property
+    def switch_hub_mapping_dict(self) -> Dict[int, str]:
+        """Parse switch_hub_mapping into a dict of hub_id -> BLE hub address."""
+        mapping: Dict[int, str] = {}
+        for pair in self.switch_hub_mapping.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            hub_id, _, hub_address = pair.partition("=")
+            mapping[int(hub_id.strip())] = hub_address.strip()
+        return mapping
+
     switch_wiring: str = Field(
         default="",
         description=(
