@@ -18,6 +18,24 @@ LEGO_HUB_SERVICE = "00001623-1212-efde-1623-785feabcd123"
 LEGO_HUB_CHAR = "00001624-1212-efde-1623-785feabcd123"
 PORT_A = 0x00  # Motor port for trains
 
+# LWP3 Hub Properties message (frame: [length, hub_id=0x00, LWP3_MSG_HUB_PROPERTIES,
+# property, operation, payload...]) -- used to subscribe to and receive
+# battery-percentage updates from stock-firmware train hubs.
+LWP3_MSG_HUB_PROPERTIES = 0x01
+LWP3_PROP_BATTERY_VOLTAGE = 0x06
+LWP3_OP_ENABLE_UPDATES = 0x02
+LWP3_OP_UPDATE = 0x06
+# Subscribe request: enable Battery Voltage (percentage 0-100) updates.
+LWP3_SUBSCRIBE_BATTERY_VOLTAGE = bytes(
+    [
+        0x05,
+        0x00,
+        LWP3_MSG_HUB_PROPERTIES,
+        LWP3_PROP_BATTERY_VOLTAGE,
+        LWP3_OP_ENABLE_UPDATES,
+    ]
+)
+
 # Pybricks GATT service/characteristics. Used for direct GATT control of
 # hubs running Pybricks firmware (switches, via
 # controllers/switch_controller.py and hubs/switch_receiver_*.py) -- the

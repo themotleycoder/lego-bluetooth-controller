@@ -15,6 +15,7 @@ from utils.constants import (
     PYBRICKS_SERVICE,
     PybricksCommand,
     PybricksEvent,
+    PybricksStatusFlag,
 )
 from utils.logging_config import get_logger
 
@@ -76,6 +77,7 @@ class SwitchController:
 
         self.switch_statuses: Dict[int, dict] = {}
         self.last_update_times: Dict[int, float] = {}
+        self.hub_status_flags: Dict[int, int] = {}  # hub_id -> PybricksStatusFlag bits
         self.reliability_stats: Dict[
             str, dict
         ] = {}  # switch_name -> {attempts, successes}
@@ -267,16 +269,18 @@ class SwitchController:
             if event_id == PybricksEvent.WRITE_STDOUT:
                 self._handle_stdout(hub_id, payload)
             elif event_id == PybricksEvent.STATUS_REPORT:
-                logger.debug(f"Switch hub {hub_id} status report: {payload!r}")
+                self._handle_status_report(hub_id, payload)
 
         return handler
 
     def _handle_stdout(self, hub_id: int, payload: bytes):
-        """Decode a 2-byte [status_byte, port_connections] status frame from the hub."""
+        """Decode a [status_byte, port_connections, battery_mv_high, battery_mv_low]
+        status frame from the hub (battery fields optional, for older firmware)."""
         if len(payload) < 2:
             return
 
         status_byte, port_connections = payload[0], payload[1]
+        battery_mv = struct.unpack(">H", payload[2:4])[0] if len(payload) >= 4 else None
         current_time = time.time()
 
         self.switch_statuses[hub_id] = {
@@ -286,8 +290,24 @@ class SwitchController:
             "connected": True,
             "timestamp": current_time,
             "name": "Technic Hub",
+            "battery_mv": battery_mv,
         }
         self.last_update_times[hub_id] = current_time
+
+    def _handle_status_report(self, hub_id: int, payload: bytes):
+        """Decode a Pybricks STATUS_REPORT event (<I little-endian flag bitfield)."""
+        if len(payload) < 4:
+            return
+        flags = struct.unpack("<I", payload[:4])[0]
+        self.hub_status_flags[hub_id] = flags
+        if flags & (
+            PybricksStatusFlag.BATTERY_LOW_VOLTAGE_WARNING
+            | PybricksStatusFlag.BATTERY_LOW_VOLTAGE_SHUTDOWN
+            | PybricksStatusFlag.BATTERY_HIGH_CURRENT
+        ):
+            logger.warning(
+                f"Switch hub {hub_id} battery flags: {PybricksStatusFlag(flags)!r}"
+            )
 
     # ------------------------------------------------------------------
     # Commands
@@ -425,6 +445,7 @@ class SwitchController:
                         "successes": stats["successes"],
                     }
 
+            status_flags = self.hub_status_flags.get(hub_id, 0)
             connected_switches[hub_id] = {
                 "switch_positions": status.get("switch_positions", {}),
                 "switch_states": status.get("switch_states", {}),
@@ -434,6 +455,15 @@ class SwitchController:
                 "connected": True,
                 "rssi": None,
                 "reliability": reliability_data,
+                "battery_mv": status.get("battery_mv"),
+                "battery_warning": bool(
+                    status_flags
+                    & (
+                        PybricksStatusFlag.BATTERY_LOW_VOLTAGE_WARNING
+                        | PybricksStatusFlag.BATTERY_LOW_VOLTAGE_SHUTDOWN
+                        | PybricksStatusFlag.BATTERY_HIGH_CURRENT
+                    )
+                ),
             }
 
         return connected_switches

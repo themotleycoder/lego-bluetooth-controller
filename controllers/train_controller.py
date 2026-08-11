@@ -6,7 +6,14 @@ from bleak import BleakClient
 from bleak.backends.device import BLEDevice
 
 from servers.bluetooth_scanner import BetterBleScanner
-from utils.constants import LEGO_HUB_CHAR, PORT_A
+from utils.constants import (
+    LEGO_HUB_CHAR,
+    LWP3_MSG_HUB_PROPERTIES,
+    LWP3_OP_UPDATE,
+    LWP3_PROP_BATTERY_VOLTAGE,
+    LWP3_SUBSCRIBE_BATTERY_VOLTAGE,
+    PORT_A,
+)
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -56,6 +63,7 @@ class TrainController:
         self._hub_rssi: Dict[str, Optional[int]] = {}
         self._last_seen: Dict[str, float] = {}
         self._last_command_time: Dict[str, float] = {}
+        self._hub_battery_percentage: Dict[str, int] = {}
 
         self._active_trains = set()
 
@@ -122,6 +130,7 @@ class TrainController:
                     await client.start_notify(
                         LEGO_HUB_CHAR, self._make_notification_handler(address)
                     )
+                    await self._subscribe_battery(client, address)
 
                     self._clients[address] = client
                     self._connection_state[address] = "connected"
@@ -144,6 +153,15 @@ class TrainController:
             )
         finally:
             self._connecting.discard(address)
+
+    async def _subscribe_battery(self, client: BleakClient, address: str) -> None:
+        """Enable Battery Voltage (percentage) hub-property updates, best-effort."""
+        try:
+            await client.write_gatt_char(
+                LEGO_HUB_CHAR, LWP3_SUBSCRIBE_BATTERY_VOLTAGE, response=True
+            )
+        except Exception as e:
+            logger.warning(f"Could not subscribe to battery updates for {address}: {e}")
 
     def _on_disconnect(self, address: str):
         """
@@ -173,13 +191,21 @@ class TrainController:
         asyncio.create_task(self._connect_hub(device.address, device))
 
     def _make_notification_handler(self, address: str):
-        """Build a per-hub notification callback that updates last-seen time."""
+        """Build a per-hub notification callback that updates last-seen time
+        and decodes Battery Voltage hub-property updates (LWP3)."""
 
         def handler(_sender, data: bytearray):
             self._last_seen[address] = time.time()
             logger.debug(
                 f"Notification from {address}: " f"{' '.join(f'{b:02x}' for b in data)}"
             )
+            if (
+                len(data) >= 6
+                and data[2] == LWP3_MSG_HUB_PROPERTIES
+                and data[3] == LWP3_PROP_BATTERY_VOLTAGE
+                and data[4] == LWP3_OP_UPDATE
+            ):
+                self._hub_battery_percentage[address] = data[5]
 
         return handler
 
@@ -294,6 +320,7 @@ class TrainController:
                     ),
                     "last_command_time": self._last_command_time.get(address),
                     "active": address in self._active_trains,
+                    "battery_percentage": self._hub_battery_percentage.get(address),
                 }
 
             return trains

@@ -1,7 +1,7 @@
 from pybricks.hubs import TechnicHub
 from pybricks.pupdevices import Motor
 from pybricks.parameters import Port, Color, Stop
-from pybricks.tools import wait
+from pybricks.tools import wait, StopWatch
 from usys import stdin, stdout
 from uselect import poll
 
@@ -20,6 +20,11 @@ from uselect import poll
 # indefinitely.
 STALL_SPEED = 200  # deg/s target while driving into the stop
 STALL_DUTY = 60  # % torque cap while stalling into the end-stop
+
+# How often to re-send the status frame when idle, so battery voltage stays
+# current even if the switch hasn't moved -- otherwise the last known
+# reading could be arbitrarily stale for a switch that rarely gets thrown.
+BATTERY_REPORT_INTERVAL_MS = 15000
 
 # Initialize hub. Commands/status now travel over the Pybricks GATT
 # connection (stdin/stdout) instead of broadcast/observe -- see
@@ -72,8 +77,12 @@ def port_connections_bitmap():
     return port_connections
 
 
+current_status = 0  # last computed status byte, resent on the battery heartbeat
+
+
 def set_switch_position(motor, switch_name, position):
     """Set switch position using motor and update tracking"""
+    global current_status
     speed = STALL_SPEED if position else -STALL_SPEED
     motor.run_until_stalled(speed, then=Stop.BRAKE, duty_limit=STALL_DUTY)
 
@@ -86,18 +95,24 @@ def set_switch_position(motor, switch_name, position):
         if pos:
             status += 1 << (ord("D") - ord(port))
 
+    current_status = status
     send_status(status)
 
 
 def send_status(status_value):
-    """Write a 2-byte status frame [status_value, port_connections] to stdout."""
+    """Write a 4-byte status frame [status_value, port_connections,
+    battery_mv_high, battery_mv_low] to stdout."""
     try:
         port_connections = port_connections_bitmap()
-        stdout.buffer.write(bytes([status_value, port_connections]))
+        battery_mv = hub.battery.voltage()
+        stdout.buffer.write(
+            bytes([status_value, port_connections]) + battery_mv.to_bytes(2, "big")
+        )
     except Exception:
         hub.light.on(Color.RED)
 
 
+battery_timer = StopWatch()
 hub.light.on(Color.GREEN)
 send_status(0)
 hub.light.on(Color.BLUE)
@@ -112,6 +127,10 @@ while True:
                 switch = chr(ord("A") + switch_num - 1)
                 if switch in motors and position in (0, 1):
                     set_switch_position(motors[switch], switch, position)
+
+        if battery_timer.time() >= BATTERY_REPORT_INTERVAL_MS:
+            send_status(current_status)
+            battery_timer.reset()
 
         wait(10)
 
