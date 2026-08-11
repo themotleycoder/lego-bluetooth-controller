@@ -279,12 +279,12 @@ def main():
     wlan = network.WLAN(network.STA_IF)
     mqtt_client = connect_mqtt() if wifi_ok else None
 
-    if mqtt_client is not None:
-        publish_status(mqtt_client, "ready")
-
     reader = build_reader()
     _battery_voltage = read_vsys_voltage()
     _last_battery_read_ms = time.ticks_ms()
+
+    if mqtt_client is not None:
+        publish_status(mqtt_client, "ready")
 
     print("Entering main loop")
     while True:
