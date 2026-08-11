@@ -314,7 +314,11 @@ class TestDeviceStatusEndpoints:
         assert "connected_trains" in data
         assert "trains" in data
         assert "timestamp" in data
-        assert data["connected_trains"] == 2
+        # sample_train_status has one connected train and one disconnected
+        # one -- the summary count must reflect only the connected one, not
+        # the total number of known trains (all entries stay in "trains").
+        assert data["connected_trains"] == 1
+        assert len(data["trains"]) == 2
 
     def test_connected_trains_empty(self, client, test_api_key):
         """Test connected trains endpoint with no trains."""

@@ -261,8 +261,16 @@ async def health_check(request: Request):
             logger.warning(f"Bluetooth health check failed: {e}")
             bluetooth_available = False
 
-        # Get connected device counts
-        connected_trains = len(controller.train_controller.get_connected_trains())
+        # Get connected device counts. get_connected_trains() keys every
+        # train ever seen (including long-disconnected ones), unlike
+        # get_connected_switches() which only ever holds live connections
+        # -- so trains must be filtered by their "connected" flag rather
+        # than counted by dict length.
+        connected_trains = sum(
+            1
+            for t in controller.train_controller.get_connected_trains().values()
+            if t["connected"]
+        )
         connected_switches = len(controller.switch_controller.get_connected_switches())
 
         # Determine overall status
@@ -478,10 +486,16 @@ async def get_connected_trains(
                 if train_id is not None
                 else None
             )
-        logger.debug(f"Retrieved {len(connected_trains)} connected trains")
+        logger.debug(f"Retrieved {len(connected_trains)} known trains")
+
+        # connected_trains keys every train this process has ever seen
+        # (so the UI can show recently-disconnected ones too), not just
+        # currently-connected ones -- the summary count must filter by the
+        # per-train "connected" flag rather than counting dict entries.
+        actually_connected = sum(1 for t in connected_trains.values() if t["connected"])
 
         return {
-            "connected_trains": len(connected_trains),
+            "connected_trains": actually_connected,
             "trains": connected_trains,
             "timestamp": time.time(),
         }
