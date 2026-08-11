@@ -468,6 +468,16 @@ async def get_connected_trains(
                 if train_id is not None
                 else False
             )
+            train_data["track_position"] = (
+                dispatcher.track_model.train_position.get(train_id)
+                if train_id is not None
+                else None
+            )
+            train_data["seconds_since_last_tag"] = (
+                dispatcher.track_model.seconds_since_last_tag(train_id)
+                if train_id is not None
+                else None
+            )
         logger.debug(f"Retrieved {len(connected_trains)} connected trains")
 
         return {

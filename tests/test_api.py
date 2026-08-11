@@ -325,6 +325,44 @@ class TestDeviceStatusEndpoints:
         assert data["connected_trains"] == 0
         assert data["trains"] == {}
 
+    def test_connected_trains_without_dispatcher_has_null_position(
+        self, client, test_api_key, sample_train_status, mock_lego_controller
+    ):
+        """Position fields default to None when the dispatcher is disabled."""
+        mock_lego_controller.train_controller.get_connected_trains.return_value = (
+            sample_train_status
+        )
+
+        response = client.get("/connected/trains", headers={"X-API-Key": test_api_key})
+
+        assert response.status_code == status.HTTP_200_OK
+        train = response.json()["trains"]["90:84:2B:18:28:36"]
+        assert train["track_position"] is None
+        assert train["seconds_since_last_tag"] is None
+
+    def test_connected_trains_with_dispatcher_includes_track_position(
+        self, client, test_api_key, sample_train_status, mock_lego_controller
+    ):
+        """Position and tag-freshness fields are sourced from the dispatcher's TrackModel."""
+        mock_lego_controller.train_controller.get_connected_trains.return_value = (
+            sample_train_status
+        )
+
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.track_model.train_id_for_hub_id.return_value = "TRN-A"
+        mock_dispatcher.track_model.train_position = {"TRN-A": "SW-3"}
+        mock_dispatcher.track_model.seconds_since_last_tag.return_value = 2.5
+
+        with patch("webservice.train_service.dispatcher", mock_dispatcher):
+            response = client.get(
+                "/connected/trains", headers={"X-API-Key": test_api_key}
+            )
+
+        assert response.status_code == status.HTTP_200_OK
+        train = response.json()["trains"]["90:84:2B:18:28:36"]
+        assert train["track_position"] == "SW-3"
+        assert train["seconds_since_last_tag"] == 2.5
+
     def test_connected_switches_without_auth(self, client):
         """Test connected switches endpoint requires authentication."""
         response = client.get("/connected/switches")

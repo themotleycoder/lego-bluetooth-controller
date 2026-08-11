@@ -57,33 +57,43 @@ def mock_bluetooth_scanner():
 
 @pytest.fixture
 def mock_lego_controller():
-    """Mock LegoController to avoid Bluetooth initialization."""
-    with patch("webservice.train_service.LegoController") as mock:
-        mock_instance = MagicMock()
-        mock_instance.initialize = AsyncMock()
-        mock_instance.running = True
+    """Mock LegoController to avoid Bluetooth initialization.
 
-        # Mock train controller
-        mock_instance.train_controller = MagicMock()
-        mock_instance.train_controller.handle_command = AsyncMock()
-        mock_instance.train_controller.get_connected_trains = MagicMock(return_value={})
-        mock_instance.train_controller.start_status_monitoring = AsyncMock()
-        mock_instance.train_controller.stop_status_monitoring = AsyncMock()
-        mock_instance.train_controller.reset_bluetooth = AsyncMock()
+    Patches the already-constructed `webservice.train_service.controller`
+    singleton directly, rather than the `LegoController` class: `patch()` has
+    to import `webservice.train_service` to resolve its target, and that
+    import runs the module's top-level `controller = LegoController()` before
+    any class-level patch could take effect. Patching the singleton attribute
+    itself sidesteps that ordering problem -- the one-time real
+    `LegoController()` construction that happens on first import is inert (no
+    BLE I/O happens until `initialize()`/`start_status_monitoring()`), and
+    every test still gets its own fresh mock swapped in for the module global
+    that route handlers and startup/shutdown events actually read.
+    """
+    mock_instance = MagicMock()
+    mock_instance.initialize = AsyncMock()
+    mock_instance.running = True
 
-        # Mock switch controller
-        mock_instance.switch_controller = MagicMock()
-        mock_instance.switch_controller.send_command_with_retry = AsyncMock(
-            return_value=True
-        )
-        mock_instance.switch_controller.get_connected_switches = MagicMock(
-            return_value={}
-        )
-        mock_instance.switch_controller.start_status_monitoring = AsyncMock()
-        mock_instance.switch_controller.scanner = MagicMock()
-        mock_instance.switch_controller.scanner.reset_bluetooth = AsyncMock()
+    # Mock train controller
+    mock_instance.train_controller = MagicMock()
+    mock_instance.train_controller.handle_command = AsyncMock()
+    mock_instance.train_controller.get_connected_trains = MagicMock(return_value={})
+    mock_instance.train_controller.start_status_monitoring = AsyncMock()
+    mock_instance.train_controller.stop_status_monitoring = AsyncMock()
+    mock_instance.train_controller.reset_bluetooth = AsyncMock()
 
-        mock.return_value = mock_instance
+    # Mock switch controller
+    mock_instance.switch_controller = MagicMock()
+    mock_instance.switch_controller.send_command_with_retry = AsyncMock(
+        return_value=True
+    )
+    mock_instance.switch_controller.get_connected_switches = MagicMock(return_value={})
+    mock_instance.switch_controller.start_status_monitoring = AsyncMock()
+    mock_instance.switch_controller.stop_status_monitoring = AsyncMock()
+    mock_instance.switch_controller.scanner = MagicMock()
+    mock_instance.switch_controller.scanner.reset_bluetooth = AsyncMock()
+
+    with patch("webservice.train_service.controller", mock_instance):
         yield mock_instance
 
 
