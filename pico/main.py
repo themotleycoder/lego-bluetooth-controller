@@ -25,6 +25,9 @@ _pending_tag = None  # (tag_uid, timestamp) buffered after a failed publish
 _wdt = None
 _battery_voltage = 0.0
 _last_battery_read_ms = 0
+# Fallback matches config.example.py -- getattr so devices with an older
+# config.py (missing this field) degrade gracefully instead of crashing.
+_BATTERY_READ_INTERVAL_MS = getattr(config, "BATTERY_READ_INTERVAL_MS", 30000)
 
 
 def read_vsys_voltage():
@@ -36,8 +39,8 @@ def read_vsys_voltage():
     so the CYW43 wireless chip continues working -- GPIO29/ADC3 is shared
     with the wireless chip's SPI CLK, so reading it while WiFi is active
     without this dance returns garbage. Called on a slow cadence (see
-    config.BATTERY_READ_INTERVAL_MS), not every loop iteration, since the
-    pin reconfiguration briefly interrupts the wireless SPI bus.
+    _BATTERY_READ_INTERVAL_MS), not every loop iteration, since the pin
+    reconfiguration briefly interrupts the wireless SPI bus.
     """
     pin25 = machine.Pin(25, machine.Pin.OUT)
     pin25.value(1)  # Enable the VSYS voltage divider FET gate
@@ -289,10 +292,7 @@ def main():
             _wdt.feed()
 
         now_ms = time.ticks_ms()
-        if (
-            time.ticks_diff(now_ms, _last_battery_read_ms)
-            >= config.BATTERY_READ_INTERVAL_MS
-        ):
+        if time.ticks_diff(now_ms, _last_battery_read_ms) >= _BATTERY_READ_INTERVAL_MS:
             _battery_voltage = read_vsys_voltage()
             _last_battery_read_ms = now_ms
 
