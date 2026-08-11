@@ -5,17 +5,21 @@ from pybricks.tools import wait
 from usys import stdin, stdout
 from uselect import poll
 
-# Motor constants. Position is driven to an absolute angle (not a timed
-# power pulse) so it reliably completes the full throw every time instead
-# of sometimes falling short -- STRAIGHT is always 0 degrees (the angle
-# each motor is zeroed to at startup, see reset_angle below), DIVERGING is
-# always MOTOR_ANGLE degrees from there. Tune MOTOR_ANGLE to match the
-# physical switch mechanism's actual throw. MOTOR_SPEED intentionally low:
-# too high a speed target makes the position controller chase the speed
-# under load instead of applying steady torque into the turn, so it
-# strains without completing the throw.
-MOTOR_SPEED = 150  # deg/s
-MOTOR_ANGLE = 40  # degrees of rotation for DIVERGING
+# Motor constants. Position is driven all the way to the switch
+# mechanism's own physical end-stop every time (motor.run_until_stalled),
+# not to a fixed encoder angle -- a fixed target (previously MOTOR_ANGLE=40
+# with run_target) reliably reached that angle but the physical switch
+# still didn't fully click, because the real throw range measured on
+# hardware via run_until_stalled is ~170 degrees at the motor (12t driver
+# / 20t follower gearing), not 40. Driving into the actual end-stop is
+# also immune to gear backlash/slop -- it can't under- or over-throw.
+# STALL_SPEED/STALL_DUTY chosen empirically: duty_limit=60 stalls
+# consistently within 1 degree of the same angle across repeated runs on
+# real hardware. then=Stop.BRAKE (not HOLD) after stalling into a hard
+# stop, since HOLD would keep driving current into an immovable stop
+# indefinitely.
+STALL_SPEED = 200  # deg/s target while driving into the stop
+STALL_DUTY = 60  # % torque cap while stalling into the end-stop
 
 # Initialize hub. Commands/status now travel over the Pybricks GATT
 # connection (stdin/stdout) instead of broadcast/observe -- see
@@ -36,10 +40,18 @@ keyboard.register(stdin)
 motors = {}
 active_ports = []
 
+
+def calibrate(motor):
+    """Drive to the STRAIGHT end-stop and zero the encoder there, regardless
+    of whatever position the switch happened to be left in."""
+    motor.run_until_stalled(-STALL_SPEED, then=Stop.BRAKE, duty_limit=STALL_DUTY)
+    motor.reset_angle(0)
+
+
 for port, port_name in zip([Port.A, Port.B, Port.C, Port.D], ["A", "B", "C", "D"]):
     try:
         motor = Motor(port)
-        motor.reset_angle(0)  # this startup position is STRAIGHT (angle 0)
+        calibrate(motor)
         motors[port_name] = motor
         active_ports.append(port_name)
     except Exception:
@@ -62,8 +74,8 @@ def port_connections_bitmap():
 
 def set_switch_position(motor, switch_name, position):
     """Set switch position using motor and update tracking"""
-    target_angle = MOTOR_ANGLE if position else 0
-    motor.run_target(MOTOR_SPEED, target_angle, then=Stop.HOLD, wait=True)
+    speed = STALL_SPEED if position else -STALL_SPEED
+    motor.run_until_stalled(speed, then=Stop.BRAKE, duty_limit=STALL_DUTY)
 
     # Update position tracking
     switch_positions[switch_name] = position
