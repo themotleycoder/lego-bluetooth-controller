@@ -28,14 +28,15 @@ TRAIN_ID = "TRN-A"  # unique per physical train, e.g. "TRN-A", "TRN-B"
 MQTT_TAG_TOPIC = "train/{}/tag".format(TRAIN_ID)
 MQTT_COMMAND_TOPIC = "train/{}/command".format(TRAIN_ID)
 
-# --- RC522 SPI wiring ---
-# Defaults below match the standard RP2040/RP2350 SPI0 pin group.
-SPI_ID = 0
-SPI_SCK_PIN = 6
-SPI_MOSI_PIN = 7
-SPI_MISO_PIN = 4
-RST_PIN = 22
-CS_PIN = 5
+# --- PN532 NFC reader (I2C) ---
+# DIP switches on the PN532 V3 board must be set to I2C mode
+# (switch 1 = ON, switch 2 = OFF).
+I2C_ID = 0
+I2C_SDA_PIN = 4  # GP4 -- I2C0 SDA (alternate pin)
+I2C_SCL_PIN = 5  # GP5 -- I2C0 SCL (alternate pin)
+I2C_FREQ = 400000
+PN532_RST_PIN = 22  # GP22 -- required for cold-boot init
+PN532_READ_TIMEOUT_MS = 200  # list_passive_target timeout per poll
 
 # --- Timing ---
 RFID_POLL_INTERVAL_MS = 100
@@ -48,3 +49,9 @@ RFID_CLEAR_AFTER_MISSES = 3
 # machine.WDT cannot be disarmed once armed on the RP2350, so it's only
 # armed after the first successful WiFi connect (see main.py).
 WATCHDOG_TIMEOUT_MS = 8000
+
+# --- Battery monitoring ---
+# LiPo (503450, 3.0V empty - 4.2V full) via VSYS. Reading it briefly
+# interrupts the CYW43 wireless chip's SPI bus (see read_vsys_voltage in
+# main.py), so it's sampled on this slower cadence, not every poll.
+BATTERY_READ_INTERVAL_MS = 30000

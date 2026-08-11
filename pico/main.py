@@ -1,7 +1,7 @@
 """
 Pico 2 W RFID tag-reporting firmware.
 
-Polls an MFRC522 reader over SPI and publishes tag reads to MQTT for the
+Polls a PN532 NFC reader over I2C and publishes tag reads to MQTT for the
 central dispatcher to consume. Also subscribes to a per-train command topic,
 but for now only logs received commands -- actual train control still goes
 through the existing LEGO hub BLE path on the central Pi, not the Pico.
@@ -15,7 +15,7 @@ import ujson as json
 from umqtt.simple import MQTTClient
 
 import config
-from mfrc522 import MFRC522
+from pn532 import PN532_I2C
 
 led = machine.Pin("LED", machine.Pin.OUT)
 
@@ -23,6 +23,34 @@ _last_uid = None
 _miss_count = 0
 _pending_tag = None  # (tag_uid, timestamp) buffered after a failed publish
 _wdt = None
+_battery_voltage = 0.0
+_last_battery_read_ms = 0
+
+
+def read_vsys_voltage():
+    """
+    Read VSYS voltage on Pico W / Pico 2 W.
+
+    GPIO25 gates the FET between the VSYS voltage divider and GPIO29.
+    Must briefly reconfigure pins, take the reading, then restore them
+    so the CYW43 wireless chip continues working -- GPIO29/ADC3 is shared
+    with the wireless chip's SPI CLK, so reading it while WiFi is active
+    without this dance returns garbage. Called on a slow cadence (see
+    config.BATTERY_READ_INTERVAL_MS), not every loop iteration, since the
+    pin reconfiguration briefly interrupts the wireless SPI bus.
+    """
+    pin25 = machine.Pin(25, machine.Pin.OUT)
+    pin25.value(1)  # Enable the VSYS voltage divider FET gate
+    machine.Pin(29, machine.Pin.IN)  # Set as input, no pull
+
+    adc = machine.ADC(3)  # ADC channel 3 = GPIO29
+    raw = adc.read_u16()
+
+    pin25.value(0)  # Restore so wireless chip SPI keeps working
+
+    # 16-bit ADC -> voltage, then x3 to undo the onboard divider
+    vsys = (raw / 65535) * 3.3 * 3
+    return round(vsys, 2)
 
 
 def _blink(times, on_ms=100, off_ms=100):
@@ -124,24 +152,45 @@ def connect_mqtt():
 
 
 def build_reader():
-    """Construct the MFRC522 reader from the configured SPI pins."""
-    return MFRC522(
-        sck=config.SPI_SCK_PIN,
-        mosi=config.SPI_MOSI_PIN,
-        miso=config.SPI_MISO_PIN,
-        rst=config.RST_PIN,
-        cs=config.CS_PIN,
-        spi_id=config.SPI_ID,
+    """Construct the PN532 reader over I2C from config.
+
+    Hardware reset via RST pin is required -- the PN532 throws
+    OSError EIO on the first I2C write without it.
+    """
+    i2c = machine.I2C(
+        config.I2C_ID,
+        sda=machine.Pin(config.I2C_SDA_PIN),
+        scl=machine.Pin(config.I2C_SCL_PIN),
+        freq=config.I2C_FREQ,
     )
+
+    rst = machine.Pin(config.PN532_RST_PIN, machine.Pin.OUT)
+    rst.value(0)
+    time.sleep_ms(100)
+    rst.value(1)
+    time.sleep_ms(500)
+
+    reader = PN532_I2C(i2c)
+
+    try:
+        fw = reader.firmware_version()
+        print("PN532 firmware:", fw)
+    except Exception as e:
+        print("PN532 init failed:", e)
+        raise
+
+    reader.set_mode(0x01)
+    return reader
 
 
 def _uid_to_hex(uid_bytes):
+    """Convert a UID (bytes or list of ints) to uppercase hex string."""
     return "".join("{:02X}".format(b) for b in uid_bytes)
 
 
 def read_tag_uid(reader):
     """
-    Poll the reader once. Returns a hex UID string on a *new* tag
+    Poll the PN532 once. Returns a hex UID string on a *new* tag
     presentation, or None otherwise.
 
     Dedup: the same UID only re-triggers a publish after
@@ -150,22 +199,21 @@ def read_tag_uid(reader):
     """
     global _last_uid, _miss_count
 
-    status, _bits = reader.request(reader.REQIDL)
-    if status != reader.OK:
+    timeout = getattr(config, "PN532_READ_TIMEOUT_MS", 200)
+    result = reader.list_passive_target(timeout=timeout)
+
+    if not result:
         _miss_count += 1
         if _miss_count >= config.RFID_CLEAR_AFTER_MISSES:
             _last_uid = None
         return None
 
-    status, raw_uid = reader.SelectTagSN()
-    if status != reader.OK:
-        _miss_count += 1
-        if _miss_count >= config.RFID_CLEAR_AFTER_MISSES:
-            _last_uid = None
-        return None
+    # result is [tg, sens_res, sel_res, uid_bytes_list]
+    # uid_bytes_list is a list of ints, e.g. [71, 8, 249, 4] -> "4708F904"
+    uid_bytes = result[3] if len(result) > 3 else result[-1]
+    uid = _uid_to_hex(uid_bytes)
 
     _miss_count = 0
-    uid = _uid_to_hex(raw_uid)
 
     if uid == _last_uid:
         return None
@@ -181,6 +229,7 @@ def publish_tag_event(client, tag_uid):
             "train_id": config.TRAIN_ID,
             "tag_uid": tag_uid,
             "timestamp": time.time(),
+            "battery_v": _battery_voltage,
         }
     )
     try:
@@ -198,6 +247,7 @@ def publish_status(client, status):
             "train_id": config.TRAIN_ID,
             "status": status,
             "timestamp": time.time(),
+            "battery_v": _battery_voltage,
         }
     )
     try:
@@ -211,8 +261,8 @@ def publish_status(client, status):
 
 
 def main():
-    """Connect WiFi/MQTT, then poll the RC522 forever, publishing tag reads."""
-    global _pending_tag, _wdt
+    """Connect WiFi/MQTT, then poll the PN532 forever, publishing tag reads."""
+    global _pending_tag, _wdt, _battery_voltage, _last_battery_read_ms
 
     wifi_ok = connect_wifi()
     if wifi_ok:
@@ -230,11 +280,21 @@ def main():
         publish_status(mqtt_client, "ready")
 
     reader = build_reader()
+    _battery_voltage = read_vsys_voltage()
+    _last_battery_read_ms = time.ticks_ms()
 
     print("Entering main loop")
     while True:
         if _wdt is not None:
             _wdt.feed()
+
+        now_ms = time.ticks_ms()
+        if (
+            time.ticks_diff(now_ms, _last_battery_read_ms)
+            >= config.BATTERY_READ_INTERVAL_MS
+        ):
+            _battery_voltage = read_vsys_voltage()
+            _last_battery_read_ms = now_ms
 
         if not wlan.isconnected():
             print("WiFi dropped, reconnecting...")
@@ -243,7 +303,7 @@ def main():
                 mqtt_client = connect_mqtt()
                 if mqtt_client is not None:
                     publish_status(mqtt_client, "reconnected")
-                reader = build_reader()  # reinit SPI after WiFi reset
+                reader = build_reader()  # reinit I2C after WiFi reset
 
         if wlan.isconnected() and mqtt_client is None:
             time.sleep_ms(config.MQTT_RECONNECT_DELAY_MS)

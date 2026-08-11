@@ -30,6 +30,10 @@ class TagEvent:
     train_id: str
     tag_uid: str
     timestamp: float
+    # LiPo voltage from the Pico's VSYS ADC, piggybacked on the tag payload.
+    # Optional/defaults to None for backward compat with older firmware
+    # that doesn't report it yet.
+    battery_v: Optional[float] = None
 
 
 class MqttBridge:
@@ -89,6 +93,7 @@ class MqttBridge:
                 train_id=str(payload["train_id"]),
                 tag_uid=str(payload["tag_uid"]),
                 timestamp=float(payload["timestamp"]),
+                battery_v=payload.get("battery_v"),
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.warning(f"Dropping malformed tag event on {msg.topic}: {e}")

@@ -164,6 +164,7 @@ class TrackModel:
         # populated at runtime via register_train() from config.
         self.trains: dict[str, Train] = {}
         self.train_position: dict[str, str] = {}
+        self.train_battery: dict[str, float] = {}  # train_id -> last known VSYS volts
         self._train_route_index: dict[str, int] = {}
         self._train_stopped: dict[str, bool] = {}
         self._train_last_tag_time: dict[str, float] = {}
@@ -492,6 +493,14 @@ class TrackModel:
         if last is None:
             return 0.0
         return (now if now is not None else time.time()) - last
+
+    def update_battery(self, train_id: str, voltage: float) -> None:
+        """Record a battery voltage reading for a train."""
+        self.train_battery[train_id] = voltage
+
+    def get_battery(self, train_id: str) -> Optional[float]:
+        """Return the last known battery voltage for a train, or None."""
+        return self.train_battery.get(train_id)
 
     def mark_stopped(self, train_id: str, stopped: bool) -> None:
         """Record whether a train is intentionally stopped (vs. cruising)."""

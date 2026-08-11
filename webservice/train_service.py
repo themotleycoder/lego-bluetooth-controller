@@ -527,6 +527,36 @@ async def get_connected_switches(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get(
+    "/dispatcher/trains",
+    tags=["Dispatcher"],
+    summary="Get dispatcher train state",
+    description="Train positions, battery levels, and movement state from the RFID dispatcher",
+)
+@limiter.limit("200/minute")
+async def get_dispatcher_trains(
+    request: Request, api_key: str = Depends(api_key_header)
+):
+    """Get dispatcher-tracked state (position, battery, movement) for every registered train."""
+    await verify_api_key(api_key)
+
+    if dispatcher is None:
+        raise HTTPException(status_code=404, detail="Dispatcher not enabled")
+
+    tm = dispatcher.track_model
+    trains = {}
+    for train_id, train in tm.trains.items():
+        trains[train_id] = {
+            "hub_id": train.hub_id,
+            "position": tm.train_position.get(train_id),
+            "battery_v": tm.train_battery.get(train_id),
+            "stopped": not tm.is_moving(train_id),
+            "seconds_since_last_tag": tm.seconds_since_last_tag(train_id),
+        }
+
+    return {"trains": trains, "timestamp": time.time()}
+
+
 # ===========================================
 # System Control Endpoints (Auth required)
 # ===========================================

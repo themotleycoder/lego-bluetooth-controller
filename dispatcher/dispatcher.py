@@ -114,6 +114,9 @@ class Dispatcher:
             event.train_id, sensor_id, event.timestamp
         )
 
+        if event.battery_v is not None:
+            self._track_model.update_battery(event.train_id, event.battery_v)
+
         if was_emergency_train and self._emergency:
             logger.warning(
                 f"Train {event.train_id} reappeared after emergency stop; "

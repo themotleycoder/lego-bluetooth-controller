@@ -50,20 +50,47 @@ DEMO_TRAIN_ROUTES = {
 # chain of blocks (some with no sensor of their own) that gets confirmed
 # together; see TrackModel.next_block_chain_for_train.
 DEFAULT_SCENARIO: List[dict] = [
-    {"delay_s": 0.2, "train_id": "TRN-A", "tag_uid": "4"},  # ends chain [CA, AH]
-    {"delay_s": 1.0, "train_id": "TRN-B", "tag_uid": "1"},  # ends chain [BJ]
+    {
+        "delay_s": 0.2,
+        "train_id": "TRN-A",
+        "tag_uid": "4",
+        "battery_v": 3.9,
+    },  # ends chain [CA, AH]
+    {
+        "delay_s": 1.0,
+        "train_id": "TRN-B",
+        "tag_uid": "1",
+        "battery_v": 3.9,
+    },  # ends chain [BJ]
     {
         "delay_s": 1.0,
         "train_id": "TRN-A",
         "tag_uid": "6",
+        "battery_v": 3.9,
     },  # ends chain [HF, FE, ED, DC]
-    {"delay_s": 1.0, "train_id": "TRN-B", "tag_uid": "3"},  # ends chain [JI_S]
-    {"delay_s": 1.0, "train_id": "TRN-A", "tag_uid": "4"},  # ends chain [CA, AH]
-    {"delay_s": 1.0, "train_id": "TRN-B", "tag_uid": "5"},  # ends chain [IF, FE, EB]
+    {
+        "delay_s": 1.0,
+        "train_id": "TRN-B",
+        "tag_uid": "3",
+        "battery_v": 3.9,
+    },  # ends chain [JI_S]
+    {
+        "delay_s": 1.0,
+        "train_id": "TRN-A",
+        "tag_uid": "4",
+        "battery_v": 3.9,
+    },  # ends chain [CA, AH]
+    {
+        "delay_s": 1.0,
+        "train_id": "TRN-B",
+        "tag_uid": "5",
+        "battery_v": 3.9,
+    },  # ends chain [IF, FE, EB]
     {
         "delay_s": 1.0,
         "train_id": "TRN-A",
         "tag_uid": "6",
+        "battery_v": 3.9,
     },  # ends chain [HF, FE, ED, DC]
 ]
 
@@ -98,6 +125,7 @@ class FakeMqttBridge:
                 train_id=step["train_id"],
                 tag_uid=step["tag_uid"],
                 timestamp=time.time(),
+                battery_v=step.get("battery_v"),
             )
             logger.info(f"[mock] publishing {event}")
             await self._queue.put(event)
