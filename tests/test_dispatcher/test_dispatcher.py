@@ -44,14 +44,14 @@ TRN_B_HUB = "F3:33:66:0C:3A:6A"
 
 def build_two_train_model() -> TrackModel:
     """
-    TRN-A and TRN-B both start needing the real A->H block (BLK_AH, requires
-    switch "A" STRAIGHT, sensor 4) -- a shared single-track segment two
+    TRN-A and TRN-B both start needing the real B->D block (BLK_BD, requires
+    switch "D" STRAIGHT, sensor 1) -- a shared single-track segment two
     trains contend for, exercising block protection end-to-end.
     """
     model = TrackModel()
-    model.configure_switch_wiring("A", hub_id=1, port_name="SWITCH_A")
-    model.register_train("TRN-A", hub_id=TRN_A_HUB, route=["A", "H"])
-    model.register_train("TRN-B", hub_id=TRN_B_HUB, route=["A", "H"])
+    model.configure_switch_wiring("D", hub_id=1, port_name="SWITCH_A")
+    model.register_train("TRN-A", hub_id=TRN_A_HUB, route=["B", "D"])
+    model.register_train("TRN-B", hub_id=TRN_B_HUB, route=["B", "D"])
     # Self-drive defaults to off; these existing tests exercise automatic
     # dispatcher-driven movement, so opt both trains in explicitly (mirrors
     # what checking "Self Drive" in the UI does for a real train).
@@ -107,7 +107,7 @@ class TestTagEventHandling:
 
         # Tag value is arbitrary here -- nothing is pending yet, so it's
         # ignored for position purposes, but the dispatcher still grants the
-        # train's first chain (A->H) unconditionally afterward.
+        # train's first chain (B->D) unconditionally afterward.
         await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))
 
         train_controller.handle_command.assert_awaited_with(
@@ -123,8 +123,8 @@ class TestTagEventHandling:
             switch_controller,
         ) = build_dispatcher()
 
-        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))  # grants A->H
-        await dispatcher._handle_tag_event(TagEvent("TRN-A", "4", 2.0))  # confirms it
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))  # grants B->D
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 2.0))  # confirms it
 
         switch_controller.send_command_with_retry.assert_awaited_with(1, "SWITCH_A", 0)
 
@@ -137,7 +137,7 @@ class TestTagEventHandling:
             switch_controller,
         ) = build_dispatcher()
 
-        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))  # grants A->H
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))  # grants B->D
         await dispatcher._handle_tag_event(TagEvent("TRN-B", "1", 1.0))  # denied
 
         train_controller.handle_command.assert_awaited_with(TRN_B_HUB, 0)
@@ -156,8 +156,8 @@ class TestTagEventHandling:
         train_controller.handle_command.reset_mock()
 
         await dispatcher._handle_tag_event(
-            TagEvent("TRN-A", "4", 2.0)
-        )  # releases BLK_AH
+            TagEvent("TRN-A", "1", 2.0)
+        )  # releases BLK_BD
 
         train_controller.handle_command.assert_any_await(
             TRN_B_HUB, dispatcher._settings.dispatcher_cruise_power
@@ -233,7 +233,7 @@ class TestSelfDrive:
             switch_controller,
         ) = build_dispatcher()
 
-        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))  # holds BLK_AH
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))  # holds BLK_BD
         await dispatcher._handle_tag_event(TagEvent("TRN-B", "1", 1.0))  # queued
         train_controller.handle_command.reset_mock()
 

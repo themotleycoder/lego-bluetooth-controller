@@ -7,7 +7,7 @@ track segments are edges. RFID sensors sit on edges for position detection.
 Usage:
     from track_model import TrackModel
     model = TrackModel()
-    route = model.find_route("SW_A", "SW_J")
+    route = model.find_route("SW_A", "SW_K")
 """
 
 from __future__ import annotations
@@ -146,7 +146,7 @@ class TrackModel:
 
     Nodes = switches (10 total: 7 motorized, 3 manual)
     Edges = track segments between switch ports
-    Sensors = 8 RFID tags on edges
+    Sensors = 9 RFID tags on edges
     Blocks = 15 occupancy zones
     """
 
@@ -187,8 +187,11 @@ class TrackModel:
         self._build_adjacency()
 
     def _build_switches(self) -> None:
-        motorized = ["A", "C", "E", "F", "H", "I", "J"]
-        manual = ["B", "D", "G"]
+        # Switch ids and topology below come from the track designer export
+        # (track-topology.json) -- note there's no switch "J": the ten ids
+        # are A-I plus K.
+        motorized = ["D", "E", "F", "G", "H", "I", "K"]
+        manual = ["A", "B", "C"]
         for sid in motorized:
             self.switches[sid] = Switch(id=sid, switch_type=SwitchType.MOTORIZED)
         for sid in manual:
@@ -196,14 +199,15 @@ class TrackModel:
 
     def _build_sensors(self) -> None:
         defs = [
-            (1, "Right upper, B-J segment"),
-            (2, "Outer top left, E(div)-B(str) outer loop"),
-            (3, "Outer bottom right, J(str)-I(str) turnaround"),
-            (4, "Middle row, A(str)-H(trunk) segment"),
-            (5, "Outer bottom left, E(div)-B(str) outer loop"),
-            (6, "Inner bottom left, D(trunk)-C(trunk) turnaround"),
-            (7, "Right diagonal, J(div)-I(div) shortcut"),
-            (8, "Upper middle, A(div)-B(div) crossover"),
+            (1, "Upper right, B-D segment"),
+            (2, "Upper left, B-K segment (near B)"),
+            (3, "Right, D-E straight segment"),
+            (4, "Upper middle, F-G segment"),
+            (5, "Lower left, B-K segment (near K)"),
+            (6, "Left, A-H segment"),
+            (7, "Right diagonal, D-E crossover"),
+            (8, "Upper middle, B-G crossover"),
+            (9, "Left middle, C-H crossover"),
         ]
         for sid, desc in defs:
             self.sensors[sid] = Sensor(id=sid, description=desc)
@@ -212,54 +216,42 @@ class TrackModel:
         E = Edge
         P = SwitchPort
         edges = [
-            # ---- Inner loop ----
-            E("CA", "C", P.STRAIGHT, "A", P.TRUNK, [], "BLK_CA"),
-            E("AH", "A", P.STRAIGHT, "H", P.TRUNK, [4], "BLK_AH"),
-            E("HF", "H", P.STRAIGHT, "F", P.STRAIGHT, [], "BLK_HF"),
-            E("FE", "F", P.TRUNK, "E", P.TRUNK, [], "BLK_FE"),
-            E("ED", "E", P.STRAIGHT, "D", P.STRAIGHT, [], "BLK_ED"),
-            E("DC", "D", P.TRUNK, "C", P.TRUNK, [6], "BLK_DC"),
-            # ---- Outer loop ----
-            E("BJ", "B", P.TRUNK, "J", P.TRUNK, [1], "BLK_BJ"),
-            E("JI_S", "J", P.STRAIGHT, "I", P.STRAIGHT, [3], "BLK_JI_S"),
-            E("IF", "I", P.TRUNK, "F", P.DIVERGE, [], "BLK_IF"),
-            # F-E shared with inner (edge FE above)
-            E("EB", "E", P.DIVERGE, "B", P.STRAIGHT, [5, 2], "BLK_EB"),
-            # ---- Crossovers ----
-            E("AB", "A", P.DIVERGE, "B", P.DIVERGE, [8], "BLK_AB"),
-            E("CG", "C", P.DIVERGE, "G", P.DIVERGE, [], "BLK_CG"),
-            E("DG", "D", P.DIVERGE, "G", P.STRAIGHT, [], "BLK_DG"),
-            E("GH", "G", P.TRUNK, "H", P.DIVERGE, [], "BLK_GH"),
-            E("JI_D", "J", P.DIVERGE, "I", P.DIVERGE, [7], "BLK_JI_D"),
+            E("AH", "A", P.TRUNK, "H", P.TRUNK, [6], "BLK_AH"),
+            E("AK", "A", P.STRAIGHT, "K", P.STRAIGHT, [], "BLK_AK"),
+            E("AC", "A", P.DIVERGE, "C", P.STRAIGHT, [], "BLK_AC"),
+            E("BD", "B", P.TRUNK, "D", P.STRAIGHT, [1], "BLK_BD"),
+            E("BK", "B", P.STRAIGHT, "K", P.DIVERGE, [2, 5], "BLK_BK"),
+            E("BG", "B", P.DIVERGE, "G", P.DIVERGE, [8], "BLK_BG"),
+            E("CF", "C", P.TRUNK, "F", P.DIVERGE, [], "BLK_CF"),
+            E("CH", "C", P.DIVERGE, "H", P.DIVERGE, [9], "BLK_CH"),
+            E("DE_S", "D", P.TRUNK, "E", P.STRAIGHT, [3], "BLK_DE_S"),
+            E("DE_D", "D", P.DIVERGE, "E", P.DIVERGE, [7], "BLK_DE_D"),
+            E("EI", "E", P.TRUNK, "I", P.DIVERGE, [], "BLK_EI"),
+            E("FG", "F", P.TRUNK, "G", P.STRAIGHT, [4], "BLK_FG"),
+            E("FI", "F", P.STRAIGHT, "I", P.STRAIGHT, [], "BLK_FI"),
+            E("GH", "G", P.TRUNK, "H", P.STRAIGHT, [], "BLK_GH"),
+            E("IK", "I", P.TRUNK, "K", P.TRUNK, [], "BLK_IK"),
         ]
         for e in edges:
             self.edges[e.id] = e
 
     def _build_blocks(self) -> None:
         blk_defs = [
-            ("BLK_CA", ["CA"], "Middle row left: C(str)-A(trunk)"),
-            (
-                "BLK_AH",
-                ["AH"],
-                "Middle row right + inner-right turn: A(str)-TAG_4-H(trunk)",
-            ),
-            ("BLK_HF", ["HF"], "Bottom inner right: H(str)-F(str)"),
-            (
-                "BLK_FE",
-                ["FE"],
-                "Bottom inner middle (shared inner/outer): F(trunk)-E(trunk)",
-            ),
-            ("BLK_ED", ["ED"], "Bottom inner left: E(str)-D(str)"),
-            ("BLK_DC", ["DC"], "Inner-left turnaround: D(trunk)-TAG_6-C(trunk)"),
-            ("BLK_BJ", ["BJ"], "Right upper: B(trunk)-TAG_1-J(trunk)"),
-            ("BLK_JI_S", ["JI_S"], "Outer right turnaround: J(str)-TAG_3-I(str)"),
-            ("BLK_IF", ["IF"], "Outer bottom right: I(trunk)-F(div)"),
-            ("BLK_EB", ["EB"], "Outer left + turnaround: E(div)-TAG_5-TAG_2-B(str)"),
-            ("BLK_AB", ["AB"], "Upper shortcut: A(div)-TAG_8-B(div)"),
-            ("BLK_CG", ["CG"], "Diagonal crossover: C(div)-G(div)"),
-            ("BLK_DG", ["DG"], "Cross track left: D(div)-G(str)"),
-            ("BLK_GH", ["GH"], "Cross track right: G(trunk)-H(div)"),
-            ("BLK_JI_D", ["JI_D"], "Diagonal shortcut: J(div)-TAG_7-I(div)"),
+            ("BLK_AH", ["AH"], "A(trunk)-TAG_6-H(trunk)"),
+            ("BLK_AK", ["AK"], "A(str)-K(str)"),
+            ("BLK_AC", ["AC"], "A(div)-C(str)"),
+            ("BLK_BD", ["BD"], "B(trunk)-TAG_1-D(str)"),
+            ("BLK_BK", ["BK"], "B(str)-TAG_2-TAG_5-K(div)"),
+            ("BLK_BG", ["BG"], "Crossover: B(div)-TAG_8-G(div)"),
+            ("BLK_CF", ["CF"], "C(trunk)-F(div)"),
+            ("BLK_CH", ["CH"], "Crossover: C(div)-TAG_9-H(div)"),
+            ("BLK_DE_S", ["DE_S"], "D(trunk)-TAG_3-E(str)"),
+            ("BLK_DE_D", ["DE_D"], "Crossover: D(div)-TAG_7-E(div)"),
+            ("BLK_EI", ["EI"], "E(trunk)-I(div)"),
+            ("BLK_FG", ["FG"], "F(trunk)-TAG_4-G(str)"),
+            ("BLK_FI", ["FI"], "F(str)-I(str)"),
+            ("BLK_GH", ["GH"], "G(trunk)-H(str)"),
+            ("BLK_IK", ["IK"], "I(trunk)-K(trunk)"),
         ]
         for bid, eids, desc in blk_defs:
             self.blocks[bid] = Block(id=bid, edge_ids=eids, description=desc)

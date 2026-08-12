@@ -26,23 +26,23 @@ from utils.logging_config import get_logger, setup_logging
 logger = get_logger(__name__)
 
 
-# Demo-only wiring/routes for --mock runs: TRN-A takes the inner loop
-# (C-A-H-F-E-D), TRN-B takes the outer loop (B-J-I-F-E), sharing the F-E
-# block between the two loops -- exercising block contention too. Real
-# deployments configure this via Settings.switch_wiring / .train_routes
-# instead (see dispatcher/factory.py::build_dispatcher).
+# Demo-only wiring/routes for --mock runs: TRN-A takes D-E-I-F-G-H, TRN-B
+# takes B-D-E-I, sharing the D-E and E-I blocks between the two routes --
+# exercising block contention too. Real deployments configure this via
+# Settings.switch_wiring / .train_routes instead (see
+# dispatcher/factory.py::build_dispatcher).
 DEMO_SWITCH_WIRING = {
-    "A": (101, "SWITCH_A"),
-    "B": (101, "SWITCH_B"),
-    "C": (101, "SWITCH_C"),
-    "F": (102, "SWITCH_A"),
+    "D": (101, "SWITCH_A"),
+    "E": (101, "SWITCH_B"),
+    "F": (101, "SWITCH_C"),
+    "G": (102, "SWITCH_A"),
     "H": (102, "SWITCH_B"),
     "I": (102, "SWITCH_C"),
-    "J": (102, "SWITCH_D"),
+    "K": (102, "SWITCH_D"),
 }
 DEMO_TRAIN_ROUTES = {
-    "TRN-A": (12, ["C", "A", "H", "F", "E", "D"]),
-    "TRN-B": (22, ["B", "J", "I", "F", "E"]),
+    "TRN-A": (12, ["D", "E", "I", "F", "G", "H"]),
+    "TRN-B": (22, ["B", "D", "E", "I"]),
 }
 
 # Sensor ids (as strings) a train reports along its route -- see the sensor
@@ -53,45 +53,27 @@ DEFAULT_SCENARIO: List[dict] = [
     {
         "delay_s": 0.2,
         "train_id": "TRN-A",
-        "tag_uid": "4",
+        "tag_uid": "3",
         "battery_v": 3.9,
-    },  # ends chain [CA, AH]
+    },  # ends chain [DE_S]
     {
         "delay_s": 1.0,
         "train_id": "TRN-B",
         "tag_uid": "1",
         "battery_v": 3.9,
-    },  # ends chain [BJ]
-    {
-        "delay_s": 1.0,
-        "train_id": "TRN-A",
-        "tag_uid": "6",
-        "battery_v": 3.9,
-    },  # ends chain [HF, FE, ED, DC]
-    {
-        "delay_s": 1.0,
-        "train_id": "TRN-B",
-        "tag_uid": "3",
-        "battery_v": 3.9,
-    },  # ends chain [JI_S]
+    },  # ends chain [BD]
     {
         "delay_s": 1.0,
         "train_id": "TRN-A",
         "tag_uid": "4",
         "battery_v": 3.9,
-    },  # ends chain [CA, AH]
+    },  # ends chain [EI, FI, FG]
     {
         "delay_s": 1.0,
         "train_id": "TRN-B",
-        "tag_uid": "5",
+        "tag_uid": "3",
         "battery_v": 3.9,
-    },  # ends chain [IF, FE, EB]
-    {
-        "delay_s": 1.0,
-        "train_id": "TRN-A",
-        "tag_uid": "6",
-        "battery_v": 3.9,
-    },  # ends chain [HF, FE, ED, DC]
+    },  # ends chain [DE_S] -- contends with TRN-A's earlier hold
 ]
 
 
