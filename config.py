@@ -142,6 +142,10 @@ class Settings(BaseSettings):
         default="train/{train_id}/tag",
         description="MQTT topic template trains publish RFID tag reads to",
     )
+    mqtt_status_topic_template: str = Field(
+        default="train/{train_id}/status",
+        description="MQTT topic template trains publish connectivity/battery status pings to",
+    )
     mqtt_command_topic_template: str = Field(
         default="train/{train_id}/command",
         description="MQTT topic template the dispatcher publishes commands to",

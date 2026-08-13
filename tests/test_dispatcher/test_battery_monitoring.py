@@ -124,6 +124,41 @@ class TestDispatcherBatteryUpdate:
 
         assert dispatcher.track_model.get_battery("TRN-A") == 3.7
 
+    async def test_status_only_ping_still_records_battery(self):
+        """A status ping (empty tag_uid, e.g. "ready"/"reconnected") has no
+        sensor to resolve, but should still update battery rather than being
+        dropped entirely alongside the missing tag."""
+        dispatcher = build_dispatcher()
+
+        await dispatcher._handle_tag_event(
+            TagEvent(train_id="TRN-A", tag_uid="", timestamp=1.0, battery_v=3.65)
+        )
+
+        assert dispatcher.track_model.get_battery("TRN-A") == 3.65
+
+    async def test_status_only_ping_does_not_advance_position(self):
+        dispatcher = build_dispatcher()
+
+        await dispatcher._handle_tag_event(
+            TagEvent(train_id="TRN-A", tag_uid="", timestamp=1.0, battery_v=3.65)
+        )
+
+        assert dispatcher.track_model.train_position["TRN-A"] == "A"
+
+    async def test_tag_with_unmapped_uid_still_records_battery(self):
+        """An unrecognized physical UID (no sensor_uid_mapping configured
+        for it) can't resolve to a sensor, but that shouldn't also silently
+        drop a battery reading riding along with it."""
+        dispatcher = build_dispatcher()
+
+        await dispatcher._handle_tag_event(
+            TagEvent(
+                train_id="TRN-A", tag_uid="DEADBEEF", timestamp=1.0, battery_v=3.55
+            )
+        )
+
+        assert dispatcher.track_model.get_battery("TRN-A") == 3.55
+
 
 # ---------------------------------------------------------------------------
 # MqttBridge._on_message battery_v parsing
@@ -183,3 +218,45 @@ class TestMqttBridgeBatteryParsing:
 
             event = await asyncio.wait_for(bridge._queue.get(), timeout=1)
             assert event.battery_v is None
+
+    async def test_status_message_parses_with_empty_tag_uid(self):
+        """Status pings (train/<id>/status) have no tag_uid field at all --
+        confirms they parse into a valid event instead of being dropped as
+        malformed, since KeyError on "tag_uid" would previously have hit
+        the same except clause as a genuinely broken payload."""
+        with patch("dispatcher.mqtt_bridge.mqtt.Client") as mock_client_cls:
+            mock_client_cls.return_value = MagicMock()
+            bridge = MqttBridge(make_settings())
+            bridge._loop = asyncio.get_running_loop()
+
+            payload = json.dumps(
+                {
+                    "train_id": "TRN-A",
+                    "status": "ready",
+                    "timestamp": 123.0,
+                    "battery_v": 3.72,
+                }
+            ).encode("utf-8")
+            bridge._on_message(
+                None, None, make_message(payload, topic="train/TRN-A/status")
+            )
+            await asyncio.sleep(0)
+
+            event = await asyncio.wait_for(bridge._queue.get(), timeout=1)
+            assert event.train_id == "TRN-A"
+            assert event.tag_uid == ""
+            assert event.battery_v == 3.72
+
+    async def test_start_subscribes_to_both_tag_and_status_topics(self):
+        with patch("dispatcher.mqtt_bridge.mqtt.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            bridge = MqttBridge(make_settings())
+
+            await bridge.start()
+
+            subscribed_topics = [
+                call.args[0] for call in mock_client.subscribe.call_args_list
+            ]
+            assert "train/+/tag" in subscribed_topics
+            assert "train/+/status" in subscribed_topics

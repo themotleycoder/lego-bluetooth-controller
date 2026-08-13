@@ -94,11 +94,24 @@ class Dispatcher:
         logger.info("Dispatcher stopped")
 
     async def _handle_tag_event(self, event: TagEvent) -> None:
-        """Process a single RFID tag read from a train."""
+        """
+        Process a single RFID tag read, or a status-only ping, from a train.
+
+        A status ping (e.g. "ready"/"reconnected") arrives with the same
+        TagEvent shape but an empty tag_uid -- there's no sensor to resolve
+        or position to update, but it may still carry a fresh battery_v, so
+        that's recorded before bailing out on the missing tag.
+        """
         if event.train_id not in self._track_model.trains:
             logger.warning(
                 f"Ignoring tag event from unregistered train: {event.train_id}"
             )
+            return
+
+        if event.battery_v is not None:
+            self._track_model.update_battery(event.train_id, event.battery_v)
+
+        if not event.tag_uid:
             return
 
         sensor_id = self._track_model.sensor_id_for_uid(event.tag_uid)
@@ -113,9 +126,6 @@ class Dispatcher:
         result = self._track_model.record_tag_event(
             event.train_id, sensor_id, event.timestamp
         )
-
-        if event.battery_v is not None:
-            self._track_model.update_battery(event.train_id, event.battery_v)
 
         if was_emergency_train and self._emergency:
             logger.warning(

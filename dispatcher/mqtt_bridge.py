@@ -63,10 +63,13 @@ class MqttBridge:
         self._client.loop_start()
 
         tag_wildcard = self._settings.mqtt_tag_topic_template.format(train_id="+")
+        status_wildcard = self._settings.mqtt_status_topic_template.format(train_id="+")
         self._client.subscribe(tag_wildcard)
+        self._client.subscribe(status_wildcard)
         logger.info(
             f"MQTT bridge connected to {self._settings.mqtt_broker_host}:"
-            f"{self._settings.mqtt_broker_port}, subscribed to {tag_wildcard}"
+            f"{self._settings.mqtt_broker_port}, subscribed to {tag_wildcard} "
+            f"and {status_wildcard}"
         )
 
     async def stop(self) -> None:
@@ -86,17 +89,25 @@ class MqttBridge:
             logger.warning(f"MQTT client disconnected unexpectedly, rc={rc}")
 
     def _on_message(self, client: Any, userdata: Any, msg: Any) -> None:
-        """Runs on paho's network thread. Parses and hands off to asyncio."""
+        """
+        Runs on paho's network thread. Parses and hands off to asyncio.
+
+        Handles both tag-read messages (train/<id>/tag, carry tag_uid) and
+        status pings (train/<id>/status, e.g. "ready"/"reconnected", no
+        tag_uid) with the same TagEvent shape -- tag_uid defaults to "" for
+        a status-only message, which Dispatcher._handle_tag_event treats as
+        "no sensor to resolve, but still record battery_v if present".
+        """
         try:
             payload = json.loads(msg.payload.decode("utf-8"))
             event = TagEvent(
                 train_id=str(payload["train_id"]),
-                tag_uid=str(payload["tag_uid"]),
+                tag_uid=str(payload.get("tag_uid", "")),
                 timestamp=float(payload["timestamp"]),
                 battery_v=payload.get("battery_v"),
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-            logger.warning(f"Dropping malformed tag event on {msg.topic}: {e}")
+            logger.warning(f"Dropping malformed message on {msg.topic}: {e}")
             return
 
         if self._loop is None:
