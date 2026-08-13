@@ -21,8 +21,8 @@ class TestTopologyShape:
         manual = [
             s for s in model.switches.values() if s.switch_type == SwitchType.MANUAL
         ]
-        assert len(motorized) == 7
-        assert len(manual) == 3
+        assert len(motorized) == 8
+        assert len(manual) == 2
 
     def test_find_route_between_switches(self):
         model = TrackModel()

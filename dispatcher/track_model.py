@@ -144,7 +144,7 @@ class TrackModel:
     """
     Full graph of the LEGO train layout.
 
-    Nodes = switches (10 total: 7 motorized, 3 manual)
+    Nodes = switches (10 total: 8 motorized, 2 manual)
     Edges = track segments between switch ports
     Sensors = 9 RFID tags on edges
     Blocks = 15 occupancy zones
@@ -189,9 +189,11 @@ class TrackModel:
     def _build_switches(self) -> None:
         # Switch ids and topology below come from the track designer export
         # (track-topology.json) -- note there's no switch "J": the ten ids
-        # are A-I plus K.
-        motorized = ["D", "E", "F", "G", "H", "I", "K"]
-        manual = ["A", "B", "C"]
+        # are A-I plus K. The export flagged A/B/C as manual, but B has
+        # since had a motor wired on (hub 5); A and C are getting motors
+        # too but aren't wired yet, so they stay manual for now.
+        motorized = ["B", "D", "E", "F", "G", "H", "I", "K"]
+        manual = ["A", "C"]
         for sid in motorized:
             self.switches[sid] = Switch(id=sid, switch_type=SwitchType.MOTORIZED)
         for sid in manual:
