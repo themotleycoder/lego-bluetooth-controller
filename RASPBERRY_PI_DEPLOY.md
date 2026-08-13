@@ -99,6 +99,10 @@ LOG_FORMAT=text
 
 # Bluetooth
 BLUETOOTH_RESET_ON_STARTUP=true
+# Only needed for external USB adapters -- see "Using External USB
+# Bluetooth Adapters" below. Leave unset to use the Pi's onboard adapter.
+# BLUETOOTH_SWITCH_ADAPTER=hci0
+# BLUETOOTH_TRAIN_ADAPTER=hci1
 ```
 
 Save and exit (Ctrl+X, Y, Enter)
@@ -117,6 +121,55 @@ sudo -n hcitool cmd 0x08 0x000A 00
 ```
 
 If the test works without asking for a password, you're good!
+
+### Optional: Using External USB Bluetooth Adapters
+
+By default the service uses whichever adapter BlueZ considers the default
+(the Pi's onboard adapter, `hci0`). If you're replacing the onboard adapter
+with external USB dongles (e.g. to increase the number of simultaneous
+switch/train BLE connections), the service can be configured to run
+switches and trains on two separate adapters, each with its own discovery
+scan and connection pool.
+
+1. **Disable the onboard adapter** so the two USB dongles deterministically
+   claim `hci0`/`hci1` on boot:
+   ```bash
+   sudo nano /boot/firmware/config.txt   # /boot/config.txt on older OS images
+   ```
+   Add this line at the end:
+   ```
+   dtoverlay=disable-bt
+   ```
+   Then disable the service that binds the onboard UART to Bluetooth and
+   reboot:
+   ```bash
+   sudo systemctl disable hciuart
+   sudo reboot
+   ```
+
+2. **Plug in both USB dongles**, then confirm both are recognized:
+   ```bash
+   hciconfig -a
+   ```
+   You should see `hci0` and `hci1`, each listing a `BD Address`. Which
+   physical dongle ends up as which doesn't matter -- they're interchangeable.
+
+3. **Set the adapter env vars** in `.env` (uncomment/edit the lines added in
+   Step 3):
+   ```bash
+   BLUETOOTH_SWITCH_ADAPTER=hci0
+   BLUETOOTH_TRAIN_ADAPTER=hci1
+   ```
+   No sudoers changes are needed -- the `hciconfig` rule from Step 4 already
+   covers adapter-scoped resets for both adapters.
+
+4. After starting the service (Step 5 below), verify in the logs that a
+   discovery scan starts on each configured adapter, and that `/health`
+   reports Bluetooth as available.
+
+If `BLUETOOTH_TRAIN_ADAPTER` is left unset, the service falls back to its
+original single-adapter behavior (both switches and trains share
+`BLUETOOTH_SWITCH_ADAPTER`, defaulting to `hci0`).
 
 ### Step 5: Start the Service
 
@@ -300,9 +353,12 @@ sudo journalctl -u lego-bluetooth-controller.service -n 50
 
 **Check Bluetooth:**
 ```bash
-hciconfig hci0
+hciconfig -a   # or `hciconfig hci0` / `hciconfig hci1` for a specific adapter
 sudo systemctl status bluetooth
 ```
+If you're using external USB adapters (see "Using External USB Bluetooth
+Adapters" above), check the specific adapters configured in `.env`
+(`BLUETOOTH_SWITCH_ADAPTER`/`BLUETOOTH_TRAIN_ADAPTER`).
 
 **Check sudo permissions:**
 ```bash

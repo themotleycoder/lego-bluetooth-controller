@@ -9,18 +9,29 @@ from controllers.train_controller import TrainController
 
 class LegoController:
     def __init__(self):
+        settings = get_settings()
         known_switch_hub_ids = {
-            hub_id for hub_id, _ in get_settings().switch_wiring_dict.values()
+            hub_id for hub_id, _ in settings.switch_wiring_dict.values()
         }
-        self.switch_controller = SwitchController(known_hub_ids=known_switch_hub_ids)
-        known_addresses = get_settings().train_hub_mapping_dict.values()
-        self.train_controller = TrainController(known_addresses=known_addresses)
-        # TrainController has no scanner of its own -- it connects using
-        # devices discovered by the switch controller's scan (the only BLE
-        # discovery session in the process; see TrainController's docstring).
-        self.switch_controller.set_device_seen_callback(
-            self.train_controller.handle_device_seen
+        self.switch_controller = SwitchController(
+            known_hub_ids=known_switch_hub_ids,
+            adapter=settings.bluetooth_switch_adapter,
         )
+        known_addresses = settings.train_hub_mapping_dict.values()
+        self.train_controller = TrainController(
+            known_addresses=known_addresses,
+            adapter=settings.bluetooth_train_adapter,
+        )
+        if settings.bluetooth_train_adapter is None:
+            # Single-adapter mode: TrainController has no scanner of its own
+            # -- it connects using devices discovered by the switch
+            # controller's scan (see TrainController's docstring). In
+            # dual-adapter mode, TrainController runs its own scan instead,
+            # since a BLEDevice discovered on one adapter can't be used to
+            # connect via a different adapter.
+            self.switch_controller.set_device_seen_callback(
+                self.train_controller.handle_device_seen
+            )
         self.running = True
 
     async def initialize(self):
@@ -50,9 +61,10 @@ class LegoController:
         # self.train_controller.reset_bluetooth()
 
         try:
-            # Create tasks for status monitoring. Only the switch controller
-            # scans (continuous BLE discovery); the train controller
-            # connects directly to configured hub addresses.
+            # Create tasks for status monitoring. In single-adapter mode
+            # only the switch controller scans (continuous BLE discovery)
+            # and the train controller connects using devices it forwards;
+            # in dual-adapter mode each controller scans its own adapter.
             switch_monitor_task = asyncio.create_task(
                 self.switch_controller.start_status_monitoring()
             )

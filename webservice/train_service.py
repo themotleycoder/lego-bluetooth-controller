@@ -248,15 +248,21 @@ async def health_check(request: Request):
     Does not require authentication.
     """
     try:
-        # Check Bluetooth availability
+        # Check Bluetooth availability for every configured adapter
         bluetooth_available = True
         try:
             import subprocess
 
-            result = subprocess.run(
-                ["hciconfig", "hci0"], capture_output=True, timeout=2
-            )
-            bluetooth_available = result.returncode == 0
+            adapters = {settings.bluetooth_switch_adapter}
+            if settings.bluetooth_train_adapter:
+                adapters.add(settings.bluetooth_train_adapter)
+
+            for adapter in adapters:
+                result = subprocess.run(
+                    ["hciconfig", adapter], capture_output=True, timeout=2
+                )
+                if result.returncode != 0:
+                    bluetooth_available = False
         except Exception as e:
             logger.warning(f"Bluetooth health check failed: {e}")
             bluetooth_available = False

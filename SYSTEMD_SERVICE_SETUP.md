@@ -284,8 +284,11 @@ tail -n 100 /var/log/lego-bluetooth-controller.error.log
 **Check Bluetooth service:**
 ```bash
 sudo systemctl status bluetooth
-sudo hciconfig hci0
+sudo hciconfig -a   # or `hciconfig hci0` / `hciconfig hci1` for a specific adapter
 ```
+If using external USB adapters (see `RASPBERRY_PI_DEPLOY.md`'s "Using
+External USB Bluetooth Adapters" section), check the adapters configured
+via `BLUETOOTH_SWITCH_ADAPTER`/`BLUETOOTH_TRAIN_ADAPTER` in `.env`.
 
 **Verify user is in bluetooth group:**
 ```bash

@@ -30,8 +30,13 @@ sudo apt-get install python3 python3-pip python3-venv -y
 sudo apt-get install bluez bluetooth -y
 
 # Verify Bluetooth is working
-hciconfig hci0
+hciconfig -a   # or `hciconfig hci0` for a specific adapter
 ```
+
+For deployments using external USB Bluetooth adapters instead of the
+onboard one (e.g. to increase the number of simultaneous connections), see
+`RASPBERRY_PI_DEPLOY.md`'s "Using External USB Bluetooth Adapters" section
+and the `BLUETOOTH_SWITCH_ADAPTER`/`BLUETOOTH_TRAIN_ADAPTER` settings below.
 
 ## Installation
 
@@ -447,7 +452,9 @@ sudo journalctl -u lego-bluetooth-controller -n 50 --no-pager
 
 **Reset Bluetooth:**
 ```bash
-# Manual reset
+# Manual reset (substitute hci0/hci1 with your configured adapter(s) --
+# BLUETOOTH_SWITCH_ADAPTER/BLUETOOTH_TRAIN_ADAPTER in .env -- if using
+# external USB adapters)
 sudo systemctl restart bluetooth
 sudo hciconfig hci0 down
 sudo hciconfig hci0 up
@@ -459,8 +466,8 @@ curl -X POST http://localhost:8000/reset \
 
 **Check Bluetooth status:**
 ```bash
-# Check adapter
-hciconfig hci0
+# Check adapter(s)
+hciconfig -a
 
 # Check for LEGO devices
 sudo hcitool lescan

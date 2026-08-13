@@ -59,6 +59,7 @@ class SwitchController:
         known_hub_ids: Optional[Iterable[int]] = None,
         max_reconnect_attempts: int = 5,
         reconnect_delay: float = 3.0,
+        adapter: Optional[str] = None,
     ):
         self.running = True
         self.max_reconnect_attempts = max_reconnect_attempts
@@ -69,7 +70,8 @@ class SwitchController:
         # any switch-<id> hub is accepted.
         self._known_hub_ids = set(known_hub_ids) if known_hub_ids else None
 
-        self.scanner = BetterBleScanner()
+        self._adapter = adapter
+        self.scanner = BetterBleScanner(adapter=adapter)
 
         self._clients: Dict[int, BleakClient] = {}  # hub_id -> client
         self._connecting: set = set()  # hub_ids currently connecting
@@ -174,6 +176,7 @@ class SwitchController:
                 try:
                     client = BleakClient(
                         device,
+                        adapter=self._adapter,
                         disconnected_callback=lambda c, hid=hub_id: self._on_disconnect(
                             hid
                         ),

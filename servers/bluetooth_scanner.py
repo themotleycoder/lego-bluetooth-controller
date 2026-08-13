@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import asyncio
 import time
+from typing import Optional
 from bleak import BleakScanner
 import subprocess
 from utils.logging_config import get_logger
@@ -9,7 +10,8 @@ logger = get_logger(__name__)
 
 
 class BetterBleScanner:
-    def __init__(self):
+    def __init__(self, adapter: Optional[str] = None):
+        self.adapter = adapter
         self.scanner = None
         self._scanning = False
         self._lock = asyncio.Lock()  # Add lock for thread safety
@@ -28,7 +30,7 @@ class BetterBleScanner:
                 await asyncio.sleep(1)  # Wait for reset
 
                 logger.debug("Creating new scanner...")
-                self.scanner = BleakScanner(callback)
+                self.scanner = BleakScanner(callback, adapter=self.adapter)
                 logger.debug("Starting scan...")
                 await self.scanner.start()
                 self._scanning = True
@@ -61,11 +63,19 @@ class BetterBleScanner:
         try:
             logger.info("Resetting Bluetooth...")
 
-            # Simple reset using bluetoothctl
-            commands = [
-                ["sudo", "bluetoothctl", "power", "off"],
-                ["sudo", "bluetoothctl", "power", "on"],
-            ]
+            if self.adapter:
+                # Adapter-scoped reset so this doesn't affect other adapters
+                # in a multi-adapter setup.
+                commands = [
+                    ["sudo", "hciconfig", self.adapter, "down"],
+                    ["sudo", "hciconfig", self.adapter, "up"],
+                ]
+            else:
+                # Simple reset using bluetoothctl (affects the default adapter)
+                commands = [
+                    ["sudo", "bluetoothctl", "power", "off"],
+                    ["sudo", "bluetoothctl", "power", "on"],
+                ]
 
             for cmd in commands:
                 try:

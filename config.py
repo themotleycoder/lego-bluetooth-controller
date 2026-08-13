@@ -62,6 +62,15 @@ class Settings(BaseSettings):
     bluetooth_reset_on_startup: bool = Field(
         default=True, description="Reset Bluetooth adapter on service startup"
     )
+    bluetooth_switch_adapter: str = Field(
+        default="hci0",
+        description="BlueZ adapter used for switch discovery/connections",
+    )
+    bluetooth_train_adapter: Optional[str] = Field(
+        default=None,
+        description="BlueZ adapter used for train connections. If unset, "
+        "trains piggyback on the switch adapter's scan (single-adapter mode).",
+    )
     max_train_connections: int = Field(
         default=10, description="Maximum number of simultaneous train connections"
     )

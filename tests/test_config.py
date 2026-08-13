@@ -113,6 +113,22 @@ class TestSettings:
 
         assert settings.bluetooth_reset_on_startup is False
 
+    def test_bluetooth_adapter_defaults(self):
+        """Test default Bluetooth adapter settings (single-adapter mode)."""
+        settings = Settings()
+
+        assert settings.bluetooth_switch_adapter == "hci0"
+        assert settings.bluetooth_train_adapter is None
+
+    def test_bluetooth_adapter_dual_adapter_mode(self):
+        """Test configuring separate switch/train adapters."""
+        settings = Settings(
+            bluetooth_switch_adapter="hci0", bluetooth_train_adapter="hci1"
+        )
+
+        assert settings.bluetooth_switch_adapter == "hci0"
+        assert settings.bluetooth_train_adapter == "hci1"
+
     def test_timing_configuration(self):
         """Test timing-related configuration."""
         settings = Settings(
