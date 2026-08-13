@@ -471,6 +471,7 @@ async def get_connected_trains(
                 if dispatcher is not None
                 else None
             )
+            train_data["train_id"] = train_id
             train_data["self_drive"] = (
                 dispatcher.track_model.is_self_drive(train_id)
                 if train_id is not None
@@ -483,6 +484,15 @@ async def get_connected_trains(
             )
             train_data["seconds_since_last_tag"] = (
                 dispatcher.track_model.seconds_since_last_tag(train_id)
+                if train_id is not None
+                else None
+            )
+            # RFID reader (Pico) battery voltage -- distinct from the LEGO
+            # hub's own battery_percentage above; only available once the
+            # dispatcher has received at least one tag/status MQTT event
+            # carrying battery_v for this train.
+            train_data["rfid_battery_v"] = (
+                dispatcher.track_model.get_battery(train_id)
                 if train_id is not None
                 else None
             )

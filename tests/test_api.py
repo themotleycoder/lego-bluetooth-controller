@@ -343,6 +343,8 @@ class TestDeviceStatusEndpoints:
         train = response.json()["trains"]["90:84:2B:18:28:36"]
         assert train["track_position"] is None
         assert train["seconds_since_last_tag"] is None
+        assert train["train_id"] is None
+        assert train["rfid_battery_v"] is None
 
     def test_connected_trains_with_dispatcher_includes_track_position(
         self, client, test_api_key, sample_train_status, mock_lego_controller
@@ -356,6 +358,7 @@ class TestDeviceStatusEndpoints:
         mock_dispatcher.track_model.train_id_for_hub_id.return_value = "TRN-A"
         mock_dispatcher.track_model.train_position = {"TRN-A": "SW-3"}
         mock_dispatcher.track_model.seconds_since_last_tag.return_value = 2.5
+        mock_dispatcher.track_model.get_battery.return_value = 3.85
 
         with patch("webservice.train_service.dispatcher", mock_dispatcher):
             response = client.get(
@@ -364,8 +367,11 @@ class TestDeviceStatusEndpoints:
 
         assert response.status_code == status.HTTP_200_OK
         train = response.json()["trains"]["90:84:2B:18:28:36"]
+        assert train["train_id"] == "TRN-A"
         assert train["track_position"] == "SW-3"
         assert train["seconds_since_last_tag"] == 2.5
+        assert train["rfid_battery_v"] == 3.85
+        mock_dispatcher.track_model.get_battery.assert_called_with("TRN-A")
 
     def test_connected_switches_without_auth(self, client):
         """Test connected switches endpoint requires authentication."""
