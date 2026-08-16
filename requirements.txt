@@ -25,3 +25,6 @@ pytest-asyncio>=0.21.0
 pytest-cov>=4.1.0
 pytest-mock>=3.11.0
 httpx>=0.24.0  # For FastAPI testing
+
+# Formatting (pinned so local `black .` and CI agree on style)
+black==23.12.1
