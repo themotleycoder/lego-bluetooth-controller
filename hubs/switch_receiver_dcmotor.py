@@ -58,7 +58,12 @@ current_status = 0  # last computed status byte, resent on the battery heartbeat
 def set_switch_position(motor, switch_name, position):
     """Set switch position using motor and update tracking"""
     global current_status
-    motor.dc(85 if position else -85)
+    # Polarity reversed relative to the position convention (0=STRAIGHT,
+    # 1=DIVERGE) -- hub 1's motors are mounted with inverted wiring
+    # relative to that assumption, confirmed on real hardware 2026-08-17:
+    # commanding STRAIGHT physically threw the switch to DIVERGE and
+    # vice versa on both ports.
+    motor.dc(-85 if position else 85)
     wait(300)
     motor.brake()
 
