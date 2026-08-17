@@ -189,11 +189,14 @@ class TrackModel:
     def _build_switches(self) -> None:
         # Switch ids and topology below come from the track designer export
         # (track-topology.json) -- note there's no switch "J": the ten ids
-        # are A-I plus K. The export flagged A/B/C as manual, but B has
-        # since had a motor wired on (hub 5); A and C are getting motors
-        # too but aren't wired yet, so they stay manual for now.
-        motorized = ["B", "D", "E", "F", "G", "H", "I", "K"]
-        manual = ["A", "C"]
+        # are A-I plus K. The export flagged A/B/C as manual. B had a motor
+        # wired on (hub 5), but hub 5's BLE connection has been unreliable
+        # (stale/garbled status notifications, commands failing verification)
+        # since at least 2026-08-13, so B is reverted to manual for now --
+        # hand-set it for TRN-A's route until hub 5 is fixed. A and C are
+        # getting motors too but aren't wired yet, so they also stay manual.
+        motorized = ["D", "E", "F", "G", "H", "I", "K"]
+        manual = ["A", "B", "C"]
         for sid in motorized:
             self.switches[sid] = Switch(id=sid, switch_type=SwitchType.MOTORIZED)
         for sid in manual:
