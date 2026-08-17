@@ -58,8 +58,8 @@ current_status = 0  # last computed status byte, resent on the battery heartbeat
 def set_switch_position(motor, switch_name, position):
     """Set switch position using motor and update tracking"""
     global current_status
-    motor.dc(70 if position else -70)
-    wait(200)
+    motor.dc(85 if position else -85)
+    wait(300)
     motor.brake()
 
     # Update position tracking
