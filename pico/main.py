@@ -28,6 +28,12 @@ _last_battery_read_ms = 0
 # Fallback matches config.example.py -- getattr so devices with an older
 # config.py (missing this field) degrade gracefully instead of crashing.
 _BATTERY_READ_INTERVAL_MS = getattr(config, "BATTERY_READ_INTERVAL_MS", 30000)
+_last_mqtt_activity_ms = 0
+# umqtt.simple never sends PINGREQ on its own -- tag reads are the only
+# traffic that would otherwise reset the broker's keepalive timer, and a
+# train can easily sit between blocks longer than that. Ping well inside
+# the keepalive window so an idle stretch doesn't get the client dropped.
+_MQTT_PING_INTERVAL_MS = min(20000, (config.MQTT_KEEPALIVE * 1000) // 2)
 
 
 def read_vsys_voltage():
@@ -147,6 +153,7 @@ def connect_mqtt():
     try:
         client.connect()
         client.subscribe(config.MQTT_COMMAND_TOPIC)
+        _note_mqtt_activity()
         print("MQTT connected, subscribed to", config.MQTT_COMMAND_TOPIC)
         return client
     except Exception as e:
@@ -237,6 +244,7 @@ def publish_tag_event(client, tag_uid):
     )
     try:
         client.publish(config.MQTT_TAG_TOPIC, payload)
+        _note_mqtt_activity()
         return True
     except Exception as e:
         print("Publish failed:", e)
@@ -256,11 +264,18 @@ def publish_status(client, status):
     try:
         topic = "train/{}/status".format(config.TRAIN_ID)
         client.publish(topic, payload)
+        _note_mqtt_activity()
         print("Published status:", status)
         return True
     except Exception as e:
         print("Status publish failed:", e)
         return False
+
+
+def _note_mqtt_activity():
+    """Record that a packet was just sent, so the ping timer doesn't fire needlessly soon after."""
+    global _last_mqtt_activity_ms
+    _last_mqtt_activity_ms = time.ticks_ms()
 
 
 def main():
@@ -316,6 +331,16 @@ def main():
                 mqtt_client.check_msg()
             except Exception as e:
                 print("MQTT check_msg failed, will reconnect:", e)
+                mqtt_client = None
+
+        if mqtt_client is not None and time.ticks_diff(
+            time.ticks_ms(), _last_mqtt_activity_ms
+        ) >= _MQTT_PING_INTERVAL_MS:
+            try:
+                mqtt_client.ping()
+                _note_mqtt_activity()
+            except Exception as e:
+                print("MQTT ping failed, will reconnect:", e)
                 mqtt_client = None
 
         if mqtt_client is not None and _pending_tag is not None:
