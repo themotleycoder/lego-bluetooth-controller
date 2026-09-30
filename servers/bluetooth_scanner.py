@@ -10,6 +10,13 @@ logger = get_logger(__name__)
 
 
 class BetterBleScanner:
+    # Bounds every BlueZ D-Bus call this class makes. Without it, a wedged
+    # adapter (observed in production: all connected hubs dropped at once,
+    # then start_scan/stop_scan hung forever waiting on D-Bus) blocks this
+    # scanner's single asyncio.Lock permanently, silently killing the
+    # monitor loop with no further logs or reconnect attempts.
+    DBUS_OP_TIMEOUT = 10.0
+
     def __init__(self, adapter: Optional[str] = None):
         self.adapter = adapter
         self.scanner = None
@@ -22,7 +29,7 @@ class BetterBleScanner:
             try:
                 if self._scanning:
                     logger.info("Scanner already running, stopping first...")
-                    await self.stop_scan()
+                    await self._stop_scan_locked()
                     await asyncio.sleep(1)  # Give time for cleanup
 
                 logger.info("Resetting Bluetooth...")
@@ -32,7 +39,9 @@ class BetterBleScanner:
                 logger.debug("Creating new scanner...")
                 self.scanner = BleakScanner(callback, adapter=self.adapter)
                 logger.debug("Starting scan...")
-                await self.scanner.start()
+                await asyncio.wait_for(
+                    self.scanner.start(), timeout=self.DBUS_OP_TIMEOUT
+                )
                 self._scanning = True
                 logger.info("Scanning started successfully")
 
@@ -45,18 +54,22 @@ class BetterBleScanner:
     async def stop_scan(self):
         """Stop scanning with forced cleanup"""
         async with self._lock:
-            if self.scanner and self._scanning:
-                try:
-                    logger.debug("Stopping scanner...")
-                    await self.scanner.stop()
-                    self._scanning = False
-                    self.scanner = None
-                    logger.info("Scanner stopped successfully")
-                except Exception as e:
-                    logger.warning(f"Warning - error stopping scanner: {e}")
-                finally:
-                    self._scanning = False
-                    self.scanner = None
+            await self._stop_scan_locked()
+
+    async def _stop_scan_locked(self):
+        """Actual stop logic, assumes self._lock is already held."""
+        if self.scanner and self._scanning:
+            try:
+                logger.debug("Stopping scanner...")
+                await asyncio.wait_for(
+                    self.scanner.stop(), timeout=self.DBUS_OP_TIMEOUT
+                )
+                logger.info("Scanner stopped successfully")
+            except Exception as e:
+                logger.warning(f"Warning - error stopping scanner: {e}")
+            finally:
+                self._scanning = False
+                self.scanner = None
 
     async def reset_bluetooth(self):
         """Reset Bluetooth to a known state"""
