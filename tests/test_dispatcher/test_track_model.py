@@ -193,10 +193,112 @@ class TestChainAdvancement:
         assert result.edges_completed == []
         assert result.current_position is None
 
-    def test_record_tag_event_updates_last_tag_time_even_when_ignored(self):
+    def test_record_tag_event_does_not_refresh_watchdog_when_ignored(self):
         model = self._build()
-        model.record_tag_event("T1", 999, timestamp=5.0)
+        model.mark_tag_seen("T1", 1.0)
+        result = model.record_tag_event("T1", 999, timestamp=5.0)
+        assert result.matched is False
+        assert model.seconds_since_last_tag("T1", now=10.0) == 9.0
+
+    def test_record_tag_event_refreshes_watchdog_when_matched(self):
+        model = TrackModel()
+        model.register_train("T1", hub_id="90:84:2B:18:28:36", route=["B", "D", "E"])
+        model.grant_pending_chain("T1", model.next_block_chain_for_train("T1"))
+        result = model.record_tag_event("T1", 1, timestamp=5.0)
+        assert result.matched is True
         assert model.seconds_since_last_tag("T1", now=10.0) == 5.0
+
+    def test_other_sensor_on_last_confirmed_edge_is_flagged_duplicate(self):
+        model = TrackModel()
+        model.register_train("T1", hub_id="90:84:2B:18:28:36", route=["K", "B", "D"])
+        # BK carries sensors 2 and 5; reading either confirms the edge.
+        model.grant_pending_chain("T1", model.next_block_chain_for_train("T1"))
+        model.record_tag_event("T1", 5, timestamp=1.0)
+        model.grant_pending_chain("T1", model.next_block_chain_for_train("T1"))
+
+        other_sensor_same_edge = model.record_tag_event("T1", 2, timestamp=2.0)
+
+        assert other_sensor_same_edge.matched is False
+        assert other_sensor_same_edge.duplicate is True
+
+    def test_repeat_of_last_confirmed_sensor_is_flagged_duplicate(self):
+        model = TrackModel()
+        model.register_train("T1", hub_id="90:84:2B:18:28:36", route=["B", "D", "E"])
+        model.grant_pending_chain("T1", model.next_block_chain_for_train("T1"))
+        model.record_tag_event("T1", 1, timestamp=1.0)
+        model.grant_pending_chain("T1", model.next_block_chain_for_train("T1"))
+
+        repeat = model.record_tag_event("T1", 1, timestamp=2.0)
+        stray = model.record_tag_event("T1", 2, timestamp=3.0)
+
+        assert repeat.matched is False and repeat.duplicate is True
+        assert stray.matched is False and stray.duplicate is False
+
+
+class TestLookaheadForMissedRead:
+    def _model(self):
+        model = TrackModel()
+        model.register_train("T1", hub_id="90:84:2B:18:28:36", route=["B", "D", "E"])
+        model.grant_pending_chain("T1", model.next_block_chain_for_train("T1"))
+        return model
+
+    def test_next_sensor_after_pending_chain_returns_its_chain(self):
+        chain = self._model().lookahead_chain_for_sensor("T1", 3)
+        assert [e.id for e in chain] == ["DE_S"]
+
+    def test_sensor_beyond_the_next_one_is_not_recoverable(self):
+        assert self._model().lookahead_chain_for_sensor("T1", 5) is None
+
+    def test_sensor_on_pending_chain_itself_is_not_a_lookahead(self):
+        assert self._model().lookahead_chain_for_sensor("T1", 1) is None
+
+    def test_smart_drive_train_has_no_lookahead(self):
+        model = TrackModel()
+        model.register_train(
+            "T1", hub_id="90:84:2B:18:28:36", smart_drive=True, start_switch="B"
+        )
+        assert model.lookahead_chain_for_sensor("T1", 3) is None
+
+    def test_recovered_read_confirms_both_chains_and_advances_position(self):
+        model = self._model()
+        chain = model.lookahead_chain_for_sensor("T1", 3)
+        model.extend_pending_chain("T1", chain)
+
+        result = model.record_tag_event("T1", 3, timestamp=1.0)
+
+        assert result.matched is True
+        assert [e.id for e in result.edges_completed] == ["BD", "DE_S"]
+        assert result.current_position == "E"
+
+
+class TestSwitchReservations:
+    def _model(self):
+        model = TrackModel()
+        model.register_train("T1", hub_id="90:84:2B:18:28:36", route=["B", "D", "E"])
+        model.register_train("T2", hub_id="9C:9A:C0:13:F2:4C", route=["D", "E", "I"])
+        return model
+
+    def test_lookahead_chain_starts_after_the_pending_chain(self):
+        model = self._model()
+        model.grant_pending_chain("T1", model.next_block_chain_for_train("T1"))
+        assert [e.id for e in model.lookahead_chain("T1")] == ["DE_S"]
+
+    def test_reserved_includes_own_and_other_trains_granted_switches(self):
+        model = self._model()
+        model.grant_pending_chain("T2", [model.edges["DE_S"]])
+        # T2's granted D->E chain needs D and E.
+        assert {"D", "E"} <= model.switches_reserved_from("T1")
+
+    def test_reserved_includes_the_other_trains_current_position(self):
+        model = self._model()
+        model.train_position["T2"] = "I"
+        assert "I" in model.switches_reserved_from("T1")
+
+    def test_a_trains_own_position_is_not_reserved_from_itself(self):
+        model = self._model()
+        model.train_position["T1"] = "B"
+        model.train_position["T2"] = "I"
+        assert "B" not in model.switches_reserved_from("T1")
 
 
 class TestHopsToSwitch:
@@ -212,6 +314,96 @@ class TestHopsToSwitch:
     def test_hops_to_switch_unregistered_train_is_zero(self):
         model = TrackModel()
         assert model.hops_to_switch("GHOST", "A") == 0
+
+
+class TestSmartDrive:
+    def test_register_train_smart_drive_without_route(self):
+        model = TrackModel()
+        model.register_train(
+            "T1", hub_id="90:84:2B:18:28:36", smart_drive=True, start_switch="D"
+        )
+        assert model.is_smart_drive("T1") is True
+        assert model.train_position["T1"] == "D"
+        assert model.trains["T1"].route is None
+
+    def test_register_train_no_route_and_not_smart_drive_raises(self):
+        model = TrackModel()
+        with pytest.raises(ValueError):
+            model.register_train("T1", hub_id="90:84:2B:18:28:36")
+
+    def test_fixed_route_train_is_not_smart_drive(self):
+        model = TrackModel()
+        model.register_train("T1", hub_id="90:84:2B:18:28:36", route=["A", "H"])
+        assert model.is_smart_drive("T1") is False
+
+    def test_choose_next_edge_never_departs_manual_switch_non_trunk(self):
+        model = TrackModel()
+        model.register_train(
+            "T1", hub_id="90:84:2B:18:28:36", smart_drive=True, start_switch="A"
+        )
+        # A is MANUAL; only its TRUNK edge (AH) is a safe departure -- AK
+        # (straight) and AC (diverge) would require assuming A's position.
+        edge = model._choose_next_edge("T1", "A")
+        assert edge.id == "AH"
+
+    def test_smart_drive_avoids_immediate_reversal_when_alternative_exists(self):
+        model = TrackModel()
+        model.register_train(
+            "T1", hub_id="90:84:2B:18:28:36", smart_drive=True, start_switch="F"
+        )
+        first = model._choose_next_edge("T1", "F")
+        model._train_last_edge["T1"] = first.id
+        alternative = model._choose_next_edge("T1", "F")
+        assert alternative.id != first.id
+
+    def test_hops_to_switch_smart_drive_uses_find_route(self):
+        model = TrackModel()
+        model.register_train(
+            "T1", hub_id="90:84:2B:18:28:36", smart_drive=True, start_switch="D"
+        )
+        assert model.hops_to_switch("T1", "H") == len(model.find_route("D", "H"))
+
+    def test_smart_drive_covers_every_reachable_edge_before_repeating(self):
+        model = TrackModel()
+        model.register_train(
+            "T1", hub_id="90:84:2B:18:28:36", smart_drive=True, start_switch="D"
+        )
+
+        # An edge is coverable if at least one of its endpoints allows it as
+        # a departure (i.e. isn't a manual switch's straight/diverge port).
+        reachable = {
+            e.id
+            for e in model.edges.values()
+            if not model._edge_requires_manual_position(e.from_switch, e.from_port)
+            or not model._edge_requires_manual_position(e.to_switch, e.to_port)
+        }
+
+        visited: set[str] = set()
+        timestamp = 0.0
+        for _ in range(200):
+            chain = model.next_block_chain_for_train("T1")
+            if not chain or not chain[-1].sensors:
+                break
+            model.grant_pending_chain("T1", chain)
+            timestamp += 1.0
+            result = model.record_tag_event(
+                "T1", chain[-1].sensors[0], timestamp=timestamp
+            )
+            visited.update(e.id for e in result.edges_completed)
+            if reachable <= visited:
+                break
+
+        assert reachable <= visited
+
+    def test_record_tag_event_tracks_edge_recency_for_smart_drive_only(self):
+        model = TrackModel()
+        model.register_train(
+            "T1", hub_id="90:84:2B:18:28:36", smart_drive=True, start_switch="D"
+        )
+        chain = model.next_block_chain_for_train("T1")
+        model.grant_pending_chain("T1", chain)
+        model.record_tag_event("T1", chain[-1].sensors[0], timestamp=1.0)
+        assert set(model._train_edge_tick["T1"]) == {e.id for e in chain}
 
 
 class TestBlockOccupancy:

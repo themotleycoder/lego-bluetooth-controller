@@ -60,6 +60,23 @@ def build_two_train_model() -> TrackModel:
     return model
 
 
+def build_two_smart_drive_train_model() -> TrackModel:
+    """
+    Same BLK_BD bottleneck as build_two_train_model, but both trains are
+    smart-drive: starting at B, its only safe (non-manual) departure is the
+    BD trunk edge, so the first chain each requests is deterministically the
+    same as the fixed-route case -- letting the existing contention
+    scenario be replayed under dynamic routing.
+    """
+    model = TrackModel()
+    model.configure_switch_wiring("D", hub_id=1, port_name="SWITCH_A")
+    model.register_train("TRN-A", hub_id=TRN_A_HUB, smart_drive=True, start_switch="B")
+    model.register_train("TRN-B", hub_id=TRN_B_HUB, smart_drive=True, start_switch="B")
+    model.set_self_drive("TRN-A", True)
+    model.set_self_drive("TRN-B", True)
+    return model
+
+
 def build_settings(**overrides) -> Settings:
     defaults = dict(
         dispatcher_watchdog_timeout=0.1,
@@ -190,6 +207,45 @@ class TestTagEventHandling:
         train_controller.handle_command.assert_not_awaited()
 
 
+class TestSmartDriveDispatch:
+    async def test_second_smart_drive_train_is_stopped_when_shared_block_is_occupied(
+        self,
+    ):
+        (
+            dispatcher,
+            model,
+            bridge,
+            train_controller,
+            switch_controller,
+        ) = build_dispatcher(model=build_two_smart_drive_train_model())
+
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))  # grants B->D
+        await dispatcher._handle_tag_event(TagEvent("TRN-B", "1", 1.0))  # denied
+
+        train_controller.handle_command.assert_awaited_with(TRN_B_HUB, 0)
+
+    async def test_queued_smart_drive_train_resumes_once_block_is_released(self):
+        (
+            dispatcher,
+            model,
+            bridge,
+            train_controller,
+            switch_controller,
+        ) = build_dispatcher(model=build_two_smart_drive_train_model())
+
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))
+        await dispatcher._handle_tag_event(TagEvent("TRN-B", "1", 1.0))  # queued
+        train_controller.handle_command.reset_mock()
+
+        await dispatcher._handle_tag_event(
+            TagEvent("TRN-A", "1", 2.0)
+        )  # releases BLK_BD
+
+        train_controller.handle_command.assert_any_await(
+            TRN_B_HUB, dispatcher._settings.dispatcher_cruise_power
+        )
+
+
 class TestSelfDrive:
     async def test_train_with_self_drive_off_does_not_advance_on_tag_event(self):
         (
@@ -314,6 +370,11 @@ class TestWatchdog:
             assert stalled_train_id is not None
 
             train_controller.handle_command.reset_mock()
+            # Only a read that confirms one of the train's pending edges
+            # clears the failsafe -- give it a granted chain to confirm.
+            model.grant_pending_chain(
+                stalled_train_id, model.next_block_chain_for_train(stalled_train_id)
+            )
             await dispatcher._handle_tag_event(TagEvent(stalled_train_id, "1", 1000.0))
 
             assert dispatcher._emergency is False
@@ -325,6 +386,209 @@ class TestWatchdog:
                 await watchdog_task
             except asyncio.CancelledError:
                 pass
+
+
+class TestUnexpectedTag:
+    async def _start_trn_a(self):
+        built = build_dispatcher()
+        dispatcher, model, bridge, train_controller, switch_controller = built
+        # First read kicks off TRN-A: it is granted BD and starts moving.
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", time.time()))
+        assert model.is_moving("TRN-A")
+        assert model.has_pending_edges("TRN-A")
+        train_controller.handle_command.reset_mock()
+        return built
+
+    async def test_unexpected_sensor_from_moving_train_stops_every_train(self):
+        dispatcher, model, bridge, train_controller, _ = await self._start_trn_a()
+
+        # TAG_3 is on D->E, not the B->D block TRN-A was granted.
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "3", time.time()))
+
+        assert dispatcher._emergency is True
+        assert dispatcher._emergency_train_id == "TRN-A"
+        stopped = {
+            call.args[0]
+            for call in train_controller.handle_command.await_args_list
+            if call.args[1] == 0
+        }
+        assert stopped == {TRN_A_HUB, TRN_B_HUB}
+
+    async def test_unexpected_sensor_never_resumes_the_train(self):
+        dispatcher, model, bridge, train_controller, _ = await self._start_trn_a()
+
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "3", time.time()))
+
+        powers = [c.args[1] for c in train_controller.handle_command.await_args_list]
+        assert all(power == 0 for power in powers)
+
+    async def test_further_unexpected_reads_do_not_clear_the_emergency(self):
+        dispatcher, model, bridge, train_controller, _ = await self._start_trn_a()
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "3", time.time()))
+        train_controller.handle_command.reset_mock()
+
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "5", time.time()))
+
+        assert dispatcher._emergency is True
+        train_controller.handle_command.assert_not_awaited()
+
+    async def test_unexpected_sensor_from_stationary_train_is_ignored(self):
+        dispatcher, model, bridge, train_controller, _ = build_dispatcher()
+        model.mark_stopped("TRN-A", True)
+
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "3", time.time()))
+
+        assert dispatcher._emergency is False
+
+
+class TestMissedReadRecovery:
+    def _model(self) -> TrackModel:
+        model = TrackModel()
+        model.configure_switch_wiring("D", hub_id=1, port_name="SWITCH_A")
+        model.configure_switch_wiring("E", hub_id=2, port_name="SWITCH_A")
+        model.register_train("TRN-A", hub_id=TRN_A_HUB, route=["B", "D", "E"])
+        model.register_train("TRN-B", hub_id=TRN_B_HUB, route=["B", "D", "E"])
+        model.set_self_drive("TRN-A", True)
+        model.set_self_drive("TRN-B", False)
+        return model
+
+    async def _kicked_off(self):
+        built = build_dispatcher(model=self._model())
+        dispatcher, model, *_ = built
+        # First read starts TRN-A on B->D (sensor 1); it is now moving.
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", time.time()))
+        assert model.is_moving("TRN-A") and model.has_pending_edges("TRN-A")
+        return built
+
+    async def test_missing_one_sensor_is_tolerated_when_the_next_one_is_read(self):
+        dispatcher, model, bridge, train_controller, _ = await self._kicked_off()
+        train_controller.handle_command.reset_mock()
+
+        # TRN-A never reports sensor 1, then reads sensor 3 (D->E).
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "3", time.time()))
+
+        assert dispatcher._emergency is False
+        assert model.train_position["TRN-A"] == "E"
+        assert all(
+            call.args[1] != 0
+            for call in train_controller.handle_command.await_args_list
+        )
+
+    async def test_skipped_blocks_are_released_after_recovery(self):
+        dispatcher, model, *_ = await self._kicked_off()
+
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "3", time.time()))
+
+        assert model.is_block_free("BLK_BD")
+        assert model.is_block_free("BLK_DE_S")
+
+    async def test_skipping_into_a_block_held_by_another_train_stops_all(self):
+        dispatcher, model, bridge, train_controller, _ = await self._kicked_off()
+        de_s = model.edges["DE_S"]
+        assert await dispatcher._block_manager.request_entry("TRN-B", [de_s])
+        train_controller.handle_command.reset_mock()
+
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "3", time.time()))
+
+        assert dispatcher._emergency is True
+        stopped = {
+            call.args[0]
+            for call in train_controller.handle_command.await_args_list
+            if call.args[1] == 0
+        }
+        assert stopped == {TRN_A_HUB, TRN_B_HUB}
+
+    async def test_skipping_two_sensors_is_not_tolerated(self):
+        dispatcher, model, *_ = await self._kicked_off()
+
+        # Sensor 5 (B-K) is two sensors beyond what TRN-A last confirmed.
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "5", time.time()))
+
+        assert dispatcher._emergency is True
+
+
+class TestSwitchPreset:
+    def _model(self) -> TrackModel:
+        model = TrackModel()
+        model.configure_switch_wiring("D", hub_id=1, port_name="SWITCH_A")
+        model.configure_switch_wiring("E", hub_id=2, port_name="SWITCH_A")
+        model.register_train("TRN-A", hub_id=TRN_A_HUB, route=["B", "D", "E"])
+        model.register_train("TRN-B", hub_id=TRN_B_HUB, route=["B", "D", "E"])
+        model.set_self_drive("TRN-A", True)
+        model.set_self_drive("TRN-B", False)
+        return model
+
+    @staticmethod
+    def _commanded_hubs(switch_controller) -> set:
+        return {
+            call.args[0]
+            for call in switch_controller.send_command_with_retry.await_args_list
+        }
+
+    async def _kick_off(self, model):
+        built = build_dispatcher(model=model)
+        dispatcher, _, _, train_controller, switch_controller = built
+        # First read starts TRN-A on B->D (sensor 1).
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", time.time()))
+        return dispatcher, train_controller, switch_controller
+
+    async def test_next_chains_switches_are_set_when_a_chain_is_granted(self):
+        _, _, switch_controller = await self._kick_off(self._model())
+
+        # B->D needs switch D; the following D->E chain needs switch E, which
+        # is set now instead of waiting for sensor 1 to be read.
+        assert self._commanded_hubs(switch_controller) == {1, 2}
+
+    async def test_switches_used_by_another_trains_granted_chain_are_left_alone(
+        self,
+    ):
+        model = self._model()
+        model.grant_pending_chain("TRN-B", [model.edges["DE_S"]])
+
+        _, _, switch_controller = await self._kick_off(model)
+
+        assert 2 not in self._commanded_hubs(switch_controller)
+
+    async def test_switch_another_train_is_positioned_at_is_left_alone(self):
+        model = self._model()
+        model.train_position["TRN-B"] = "E"
+
+        _, _, switch_controller = await self._kick_off(model)
+
+        assert 2 not in self._commanded_hubs(switch_controller)
+
+    async def test_preset_failure_does_not_stop_the_train(self):
+        model = self._model()
+        built = build_dispatcher(model=model)
+        dispatcher, _, _, train_controller, switch_controller = built
+
+        async def fail_for_switch_e(hub_id, port_name, position):
+            return hub_id != 2
+
+        switch_controller.send_command_with_retry.side_effect = fail_for_switch_e
+
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", time.time()))
+
+        assert model.is_moving("TRN-A")
+        assert all(
+            call.args[1] != 0
+            for call in train_controller.handle_command.await_args_list
+        )
+
+
+class TestDeviceClockIsNotTrusted:
+    async def test_tag_with_a_wildly_wrong_pico_timestamp_does_not_trip_the_watchdog(
+        self,
+    ):
+        dispatcher, model, *_ = build_dispatcher()
+        model.set_self_drive("TRN-A", True)
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", time.time()))
+        assert model.is_moving("TRN-A")
+
+        # An unsynced Pico stamps events near the 2021 epoch.
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1609459660.0))
+
+        assert model.seconds_since_last_tag("TRN-A") < 5.0
 
 
 class TestRunAndStop:

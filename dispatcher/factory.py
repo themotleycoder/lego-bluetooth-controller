@@ -31,14 +31,25 @@ def build_dispatcher(
         track_model.configure_sensor_uid(sensor_id, uid)
 
     routes = settings.train_routes_dict
+    smart_drive_ids = settings.train_smart_drive_set
     for train_id, hub_id in settings.train_hub_mapping_dict.items():
         route = routes.get(train_id)
-        if route:
-            track_model.register_train(train_id, hub_id, route)
+        smart_drive = train_id in smart_drive_ids
+        if smart_drive and route:
+            logger.warning(
+                f"Train {train_id} has both a configured route and "
+                "TRAIN_SMART_DRIVE set; ignoring the fixed route in favor of "
+                "smart-drive"
+            )
+            route = None
+        if route or smart_drive:
+            track_model.register_train(
+                train_id, hub_id, route=route, smart_drive=smart_drive
+            )
         else:
             logger.warning(
                 f"Train {train_id} has a hub mapping but no configured route "
-                "(train_routes); it will never be dispatched"
+                "(train_routes) or smart-drive flag; it will never be dispatched"
             )
 
     block_manager = BlockManager(track_model)

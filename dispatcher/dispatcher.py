@@ -12,6 +12,7 @@ a train under dispatcher control.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Dict, List, Optional
 
 from config import Settings
@@ -19,7 +20,7 @@ from controllers.switch_controller import SwitchController
 from controllers.train_controller import TrainController
 from dispatcher.block_manager import BlockManager
 from dispatcher.mqtt_bridge import MqttBridge, TagEvent
-from dispatcher.track_model import Edge, TrackModel
+from dispatcher.track_model import TagEventResult, Edge, TrackModel
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -123,11 +124,37 @@ class Dispatcher:
 
         was_emergency_train = event.train_id == self._emergency_train_id
 
+        # The Pico's own clock isn't trusted: after a reboot it can be minutes
+        # or years off until NTP syncs, which would trip the watchdog.
+        received_at = time.time()
         result = self._track_model.record_tag_event(
-            event.train_id, sensor_id, event.timestamp
+            event.train_id, sensor_id, received_at
         )
 
-        if was_emergency_train and self._emergency:
+        if (
+            not result.matched
+            and not result.duplicate
+            and not self._emergency
+            and self._track_model.is_self_drive(event.train_id)
+            and self._track_model.is_moving(event.train_id)
+            and self._track_model.has_pending_edges(event.train_id)
+        ):
+            # A moving train holding a granted chain just read a sensor that
+            # isn't on it. If it is exactly the next sensor along the train's
+            # route, it most likely missed one read (bad read timing) and is
+            # where the route says it should be; anything else means it is
+            # somewhere the dispatcher didn't send it, so block protection can
+            # no longer be trusted and everything is stopped.
+            recovered = await self._recover_missed_read(event, sensor_id, received_at)
+            if recovered is None:
+                await self._emergency_stop_all(
+                    event.train_id,
+                    f"read unexpected sensor {sensor_id} (position lost)",
+                )
+                return
+            result = recovered
+
+        if was_emergency_train and self._emergency and result.matched:
             logger.warning(
                 f"Train {event.train_id} reappeared after emergency stop; "
                 "clearing failsafe and resuming all trains"
@@ -149,6 +176,33 @@ class Dispatcher:
 
         next_chain = self._track_model.next_block_chain_for_train(event.train_id)
         await self._attempt_advance(event.train_id, next_chain)
+
+    async def _recover_missed_read(
+        self, event: TagEvent, sensor_id: int, received_at: float
+    ) -> Optional[TagEventResult]:
+        """
+        Accept a read of the sensor after the one the train missed, if safe.
+
+        Returns the resulting TagEventResult, or None if `sensor_id` isn't the
+        next sensor on the train's route or another train holds a block the
+        train has effectively already entered (the caller then stops all).
+        """
+        train_id = event.train_id
+        chain = self._track_model.lookahead_chain_for_sensor(train_id, sensor_id)
+        if not chain:
+            return None
+        if not await self._block_manager.try_claim(train_id, chain):
+            logger.critical(
+                f"Train {train_id} skipped ahead to sensor {sensor_id} but "
+                "another train holds a block on that stretch"
+            )
+            return None
+        logger.warning(
+            f"Train {train_id} read sensor {sensor_id} without confirming the "
+            "sensor before it; treating the earlier read as missed"
+        )
+        self._track_model.extend_pending_chain(train_id, chain)
+        return self._track_model.record_tag_event(train_id, sensor_id, received_at)
 
     async def _attempt_advance(
         self, train_id: str, chain: Optional[List[Edge]]
@@ -179,6 +233,32 @@ class Dispatcher:
         self._track_model.grant_pending_chain(train_id, chain)
         self._pending_chain.pop(train_id, None)
         await self._resume_train(train_id)
+        await self._preset_next_chain_switches(train_id)
+
+    async def _preset_next_chain_switches(self, train_id: str) -> None:
+        """
+        Set the switches for the chain after the one just granted, ahead of
+        the tag read that would normally trigger it.
+
+        Switches are otherwise only set once a tag confirms the previous
+        chain, so a single missed read would leave the next switch in
+        whatever position it happened to be in. This is best effort: a
+        failure only logs, since the chain is set again (and verified) when
+        it is actually granted. Switches the current chain or another train
+        depends on are left alone.
+        """
+        chain = self._track_model.lookahead_chain(train_id)
+        if not chain:
+            return
+        exclude = self._track_model.switches_reserved_from(train_id)
+        ok = await self._block_manager.set_switches_for_chain(
+            chain, self._switch_controller, exclude=exclude
+        )
+        if not ok:
+            logger.warning(
+                f"Could not pre-set switches for {train_id}'s next chain; "
+                "they will be set when the chain is granted"
+            )
 
     async def set_self_drive(self, train_id: str, enabled: bool) -> bool:
         """
@@ -257,11 +337,14 @@ class Dispatcher:
                     await self._emergency_stop_all(train_id)
                     break
 
-    async def _emergency_stop_all(self, stalled_train_id: str) -> None:
-        """Stop every train; latches until the stalled train's tag reappears."""
+    async def _emergency_stop_all(
+        self,
+        stalled_train_id: str,
+        reason: str = "missed its expected tag",
+    ) -> None:
+        """Stop every train; latches until the train next confirms a pending tag."""
         logger.critical(
-            f"Watchdog timeout: train {stalled_train_id} missed its expected "
-            "tag. Stopping all trains."
+            f"Emergency stop: train {stalled_train_id} {reason}. Stopping all trains."
         )
         self._emergency = True
         self._emergency_train_id = stalled_train_id

@@ -80,6 +80,16 @@ class TestResolveContention:
 
         assert bm.resolve_contention("T1", "T3", edge) == "T3"
 
+    def test_smart_drive_trains_use_find_route_based_hops(self):
+        model = TrackModel()
+        model.register_train("S1", hub_id=1, smart_drive=True, start_switch="D")
+        model.register_train("S2", hub_id=2, smart_drive=True, start_switch="B")
+        bm = BlockManager(model)
+        edge = model.edges["DE_S"]  # from_switch == "D"
+
+        # S1 is already at D (0 hops); S2 needs to reach D first (1 hop via BD).
+        assert bm.resolve_contention("S1", "S2", edge) == "S2"
+
 
 class TestReleaseAndRequeue:
     async def test_release_frees_the_blocks(self):

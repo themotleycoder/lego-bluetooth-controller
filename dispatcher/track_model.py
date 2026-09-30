@@ -118,11 +118,20 @@ class Block:
 
 @dataclass
 class Train:
-    """A train's identity and its fixed, pre-assigned cyclic route through switches."""
+    """
+    A train's identity and how it decides where to go next.
+
+    `route` is a fixed, pre-assigned cyclic list of switch ids -- used unless
+    the train is in smart-drive mode, in which case it's None and the train
+    instead picks its next edge dynamically (see TrackModel._choose_next_edge)
+    to cover the whole layout over time instead of looping a fixed path.
+    """
 
     id: str
     hub_id: str  # BLE address of the train hub, e.g. "90:84:2B:18:28:36"
-    route: list[str]  # cyclic list of switch ids
+    route: Optional[
+        list[str]
+    ] = None  # cyclic list of switch ids, or None if smart-drive
 
 
 @dataclass
@@ -133,6 +142,12 @@ class TagEventResult:
     previous_position: Optional[str]
     current_position: Optional[str]
     edges_completed: list[Edge]
+    # True only if the read confirmed one of the train's pending edges.
+    matched: bool = False
+    # True if the read is on the edge the train last confirmed: the reader can
+    # report the same tag repeatedly, and an edge with two sensors (e.g. BK)
+    # is confirmed by whichever is read first while the train is still on it.
+    duplicate: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -168,10 +183,20 @@ class TrackModel:
         self._train_route_index: dict[str, int] = {}
         self._train_stopped: dict[str, bool] = {}
         self._train_last_tag_time: dict[str, float] = {}
+        self._train_last_confirmed_edge: dict[str, str] = {}
         self._train_self_drive: dict[str, bool] = {}
         # Edges granted to a train but not yet confirmed cleared by a tag read,
         # in route order. See TrackModel.next_block_chain_for_train.
         self._pending_edges: dict[str, list[Edge]] = {}
+        # Smart-drive (dynamic coverage routing) state -- see register_train
+        # and _choose_next_edge. Coverage is driven by least-recently-used
+        # edge selection: _train_edge_tick records the tick each edge was
+        # last confirmed at (missing = never visited, treated as oldest),
+        # and _train_tick is each train's monotonic visit counter.
+        self._train_smart_drive: dict[str, bool] = {}
+        self._train_edge_tick: dict[str, dict[str, int]] = {}
+        self._train_tick: dict[str, int] = {}
+        self._train_last_edge: dict[str, Optional[str]] = {}
 
         self._build()
 
@@ -462,21 +487,57 @@ class TrackModel:
     # Train registry and live position/movement tracking
     # ------------------------------------------------------------------
 
-    def register_train(self, train_id: str, hub_id: str, route: list[str]) -> None:
-        """Register a train with its fixed, pre-assigned cyclic route of switch ids."""
-        if not route:
-            raise ValueError(f"Train {train_id} needs a non-empty route")
-        for switch_id in route:
-            if switch_id not in self.switches:
-                raise ValueError(
-                    f"Train {train_id} route references unknown switch {switch_id}"
-                )
-        self.trains[train_id] = Train(id=train_id, hub_id=hub_id, route=list(route))
-        self.train_position[train_id] = route[0]
+    def register_train(
+        self,
+        train_id: str,
+        hub_id: str,
+        route: Optional[list[str]] = None,
+        smart_drive: bool = False,
+        start_switch: Optional[str] = None,
+    ) -> None:
+        """
+        Register a train, either with a fixed cyclic route or in smart-drive mode.
+
+        `route` is required unless `smart_drive=True`, in which case the train
+        instead picks its next edge dynamically (see _choose_next_edge) --
+        `start_switch` sets its initial position (defaults to an arbitrary
+        motorized switch if omitted).
+        """
+        if not route and not smart_drive:
+            raise ValueError(
+                f"Train {train_id} needs a non-empty route, or smart_drive=True"
+            )
+        if route:
+            for switch_id in route:
+                if switch_id not in self.switches:
+                    raise ValueError(
+                        f"Train {train_id} route references unknown switch {switch_id}"
+                    )
+        self.trains[train_id] = Train(
+            id=train_id, hub_id=hub_id, route=list(route) if route else None
+        )
+        if route:
+            initial_position = route[0]
+        elif start_switch is not None:
+            if start_switch not in self.switches:
+                raise ValueError(f"Unknown start_switch {start_switch}")
+            initial_position = start_switch
+        else:
+            initial_position = next(iter(self.switches))
+        self.train_position[train_id] = initial_position
         self._train_route_index[train_id] = 0
         self._pending_edges[train_id] = []
         self._train_stopped[train_id] = True
         self._train_self_drive[train_id] = False
+        self._train_smart_drive[train_id] = smart_drive
+        self._train_edge_tick[train_id] = {}
+        self._train_tick[train_id] = 0
+        self._train_last_edge[train_id] = None
+        self._train_last_confirmed_edge.pop(train_id, None)
+
+    def is_smart_drive(self, train_id: str) -> bool:
+        """True if this train picks its next edge dynamically instead of a fixed route."""
+        return self._train_smart_drive.get(train_id, False)
 
     def mark_tag_seen(self, train_id: str, timestamp: float) -> None:
         """Record that a train reported a tag at `timestamp`, for watchdog timing."""
@@ -503,6 +564,10 @@ class TrackModel:
         """Record whether a train is intentionally stopped (vs. cruising)."""
         self._train_stopped[train_id] = stopped
 
+    def has_pending_edges(self, train_id: str) -> bool:
+        """True if the train has been granted edges it hasn't yet confirmed."""
+        return bool(self._pending_edges.get(train_id))
+
     def is_moving(self, train_id: str) -> bool:
         """True once a train has been explicitly marked as not stopped."""
         return not self._train_stopped.get(train_id, True)
@@ -525,7 +590,16 @@ class TrackModel:
     def hops_to_switch(self, train_id: str, target_switch: str) -> int:
         """Route-hops from a train's current position to target_switch (for contention)."""
         train = self.trains.get(train_id)
-        if train is None or not train.route:
+        if train is None:
+            return 0
+        if self.is_smart_drive(train_id):
+            current = self.train_position.get(train_id)
+            if current is None:
+                return 0
+            path = self.find_route(current, target_switch)
+            # Unreachable -- treat as maximally far so it never wins a tiebreak.
+            return len(path) if path is not None else len(self.edges) + 1
+        if not train.route:
             return 0
         route_len = len(train.route)
         idx = self._train_route_index.get(train_id, 0)
@@ -546,19 +620,172 @@ class TrackModel:
         (see BlockManager) -- all or nothing, like switch-setting already is.
         """
         train = self.trains.get(train_id)
-        if train is None or not train.route:
+        if train is None:
             return None
-        route_len = len(train.route)
-        idx = self._train_route_index.get(train_id, 0)
+        if self.is_smart_drive(train_id):
+            return self._next_chain_smart_drive(train_id)
+        if not train.route:
+            return None
+        return self._fixed_route_chain(train, self._train_route_index.get(train_id, 0))
+
+    def _fixed_route_chain(self, train: Train, start_idx: int) -> Optional[list[Edge]]:
+        """The chain of a fixed-route train's edges starting at route index `start_idx`."""
+        route = train.route or []
+        route_len = len(route)
         chain: list[Edge] = []
         for step in range(route_len):
-            current_switch = train.route[(idx + step) % route_len]
-            next_switch = train.route[(idx + step + 1) % route_len]
+            current_switch = route[(start_idx + step) % route_len]
+            next_switch = route[(start_idx + step + 1) % route_len]
             candidates = self.edge_between(current_switch, next_switch)
             if not candidates:
                 break
             edge = candidates[0]
             chain.append(edge)
+            if edge.sensors:
+                break
+        return chain or None
+
+    def lookahead_chain(self, train_id: str) -> Optional[list[Edge]]:
+        """
+        The chain a fixed-route train would be granted *after* its current
+        pending one, or None for smart-drive trains (whose path is chosen
+        dynamically) and trains without a route.
+        """
+        train = self.trains.get(train_id)
+        if train is None or self.is_smart_drive(train_id) or not train.route:
+            return None
+        pending = self._pending_edges.get(train_id, [])
+        start_idx = self._train_route_index.get(train_id, 0) + len(pending)
+        return self._fixed_route_chain(train, start_idx)
+
+    def lookahead_chain_for_sensor(
+        self, train_id: str, sensor_id: int
+    ) -> Optional[list[Edge]]:
+        """
+        The lookahead chain, if `sensor_id` sits on it -- i.e. the sensor is
+        the very next one the train should have read had it not missed one.
+
+        Used to recognize a single missed read: a train that skipped a tag and
+        then read exactly the following one is where its route says it should
+        be. Smart-drive trains and any other sensor return None.
+        """
+        chain = self.lookahead_chain(train_id)
+        if not chain:
+            return None
+        target = self.sensor_on_edge(sensor_id)
+        return chain if target is not None and target in chain else None
+
+    def switches_reserved_from(self, train_id: str) -> set[str]:
+        """
+        Switches `train_id` must not flip ahead of time: any switch needed by
+        its own granted chain or by another train's granted chain, plus any
+        switch another train is currently positioned at.
+        """
+        reserved: set[str] = set()
+        for other_id in self.trains:
+            pending = self._pending_edges.get(other_id, [])
+            reserved.update(sw for sw, _ in self.route_switch_settings(pending))
+            if other_id != train_id:
+                position = self.train_position.get(other_id)
+                if position is not None:
+                    reserved.add(position)
+        return reserved
+
+    def extend_pending_chain(self, train_id: str, chain: list[Edge]) -> None:
+        """Append edges to a train's granted-but-unconfirmed chain."""
+        self._pending_edges[train_id] = self._pending_edges.get(train_id, []) + list(
+            chain
+        )
+
+    def _edge_requires_manual_position(self, switch_id: str, port: SwitchPort) -> bool:
+        """
+        True if departing `switch_id` via `port` requires a manual switch to
+        already be in a specific, dispatcher-unverifiable position.
+
+        TRUNK is always connected regardless of position, so it's always safe;
+        STRAIGHT/DIVERGE on a MANUAL switch is not, since the dispatcher can
+        neither read nor set that switch's physical state.
+        """
+        switch = self.switches.get(switch_id)
+        return (
+            switch is not None
+            and switch.switch_type == SwitchType.MANUAL
+            and port != SwitchPort.TRUNK
+        )
+
+    def _departure_port(self, edge: Edge, from_switch: str) -> SwitchPort:
+        """The port on `from_switch` a train uses to depart along `edge`."""
+        return edge.from_port if edge.from_switch == from_switch else edge.to_port
+
+    def _other_switch(self, edge: Edge, switch_id: str) -> str:
+        """The switch at the far end of `edge` from `switch_id`."""
+        return edge.to_switch if edge.from_switch == switch_id else edge.from_switch
+
+    def _choose_next_edge(
+        self,
+        train_id: str,
+        current_switch: str,
+        last_edge_id: Optional[str] = None,
+        edge_tick: Optional[dict[str, int]] = None,
+    ) -> Optional[Edge]:
+        """
+        Pick the next edge for a smart-drive train, favoring full coverage.
+
+        Always prefers the least-recently-visited candidate (never-visited
+        edges rank above any visited one), avoids immediately reversing back
+        along the edge just traversed when an alternative exists, and never
+        departs via a manual switch's straight/diverge port (see
+        _edge_requires_manual_position). Ties break lexically by edge id for
+        determinism.
+
+        `last_edge_id`/`edge_tick` default to the train's last *confirmed*
+        state, but a caller building a multi-hop chain in one call (see
+        _next_chain_smart_drive) must pass its own evolving copies -- without
+        that, reversal-avoidance and recency both only know about edges from
+        *previous* chains, so a chain being built in a single call could
+        bounce back and forth on one just-chosen edge forever.
+        """
+        candidates = [
+            e
+            for e in self.edges_from(current_switch)
+            if not self._edge_requires_manual_position(
+                current_switch, self._departure_port(e, current_switch)
+            )
+        ]
+        if not candidates:
+            return None
+
+        if last_edge_id is None:
+            last_edge_id = self._train_last_edge.get(train_id)
+        if edge_tick is None:
+            edge_tick = self._train_edge_tick.get(train_id, {})
+
+        non_reversing = [e for e in candidates if e.id != last_edge_id]
+        pool = non_reversing or candidates
+
+        return min(pool, key=lambda e: (edge_tick.get(e.id, -1), e.id))
+
+    def _next_chain_smart_drive(self, train_id: str) -> Optional[list[Edge]]:
+        """Dynamic analog of the fixed-route chain-building loop above."""
+        current_switch = self.train_position.get(train_id)
+        if current_switch is None:
+            return None
+        chain: list[Edge] = []
+        last_edge_id = self._train_last_edge.get(train_id)
+        edge_tick = dict(self._train_edge_tick.get(train_id, {}))
+        tick = self._train_tick.get(train_id, 0)
+        # Safety bound: no chain should ever need more hops than there are edges.
+        for _ in range(len(self.edges) + 1):
+            edge = self._choose_next_edge(
+                train_id, current_switch, last_edge_id, edge_tick
+            )
+            if edge is None:
+                break
+            chain.append(edge)
+            tick += 1
+            edge_tick[edge.id] = tick
+            last_edge_id = edge.id
+            current_switch = self._other_switch(edge, current_switch)
             if edge.sensors:
                 break
         return chain or None
@@ -579,7 +806,6 @@ class TrackModel:
         edge isn't currently pending for this train (unregistered train,
         stray/foreign read) are ignored -- no position update, no completion.
         """
-        self.mark_tag_seen(train_id, timestamp)
         previous_position = self.train_position.get(train_id)
         train = self.trains.get(train_id)
         if train is None:
@@ -588,17 +814,52 @@ class TrackModel:
         edge = self.sensor_on_edge(sensor_id)
         pending = self._pending_edges.get(train_id, [])
         if edge is None or edge not in pending:
-            return TagEventResult(train_id, previous_position, previous_position, [])
+            # Deliberately does not refresh the watchdog: a stray read means
+            # the train is somewhere the dispatcher didn't expect, not that
+            # it is making progress along its granted chain.
+            return TagEventResult(
+                train_id,
+                previous_position,
+                previous_position,
+                [],
+                matched=False,
+                duplicate=edge is not None
+                and edge.id == self._train_last_confirmed_edge.get(train_id),
+            )
+
+        self.mark_tag_seen(train_id, timestamp)
+        self._train_last_confirmed_edge[train_id] = edge.id
 
         i = pending.index(edge)
         completed = pending[: i + 1]
         self._pending_edges[train_id] = pending[i + 1 :]
-        self._train_route_index[train_id] = self._train_route_index.get(
-            train_id, 0
-        ) + len(completed)
-        new_position = train.route[self._train_route_index[train_id] % len(train.route)]
+
+        smart = self.is_smart_drive(train_id)
+        if not smart:
+            self._train_route_index[train_id] = self._train_route_index.get(
+                train_id, 0
+            ) + len(completed)
+
+        # Derive the new position by walking the completed edges from the
+        # train's last known position -- works the same way regardless of
+        # whether the route is fixed or dynamically chosen.
+        position = previous_position
+        for completed_edge in completed:
+            if position is None:
+                break
+            position = self._other_switch(completed_edge, position)
+            if smart:
+                tick = self._train_tick.get(train_id, 0) + 1
+                self._train_tick[train_id] = tick
+                self._train_edge_tick.setdefault(train_id, {})[completed_edge.id] = tick
+        if smart and completed:
+            self._train_last_edge[train_id] = completed[-1].id
+
+        new_position = position if position is not None else previous_position
         self.train_position[train_id] = new_position
-        return TagEventResult(train_id, previous_position, new_position, completed)
+        return TagEventResult(
+            train_id, previous_position, new_position, completed, matched=True
+        )
 
     # ------------------------------------------------------------------
     # Block occupancy

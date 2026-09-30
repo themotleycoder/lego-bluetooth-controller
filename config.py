@@ -6,7 +6,7 @@ All configuration can be overridden via environment variables or .env file.
 """
 
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -219,6 +219,20 @@ class Settings(BaseSettings):
             if switch_ids:
                 routes[train_id.strip()] = switch_ids
         return routes
+
+    train_smart_drive: str = Field(
+        default="",
+        description=(
+            "Comma-separated train_ids that should dynamically choose their "
+            "next edge to cover the whole layout instead of following a "
+            "fixed train_routes entry, e.g. 'TRN-A,TRN-B'"
+        ),
+    )
+
+    @property
+    def train_smart_drive_set(self) -> Set[str]:
+        """Parse train_smart_drive into a set of train_ids."""
+        return {t.strip() for t in self.train_smart_drive.split(",") if t.strip()}
 
     switch_wiring: str = Field(
         default="",

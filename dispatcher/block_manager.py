@@ -5,7 +5,7 @@ RFID dispatcher.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from controllers.switch_controller import SwitchController
 from dispatcher.track_model import Edge, SwitchType, TrackModel
@@ -54,6 +54,26 @@ class BlockManager:
                 self._queue(edge.block, train_id)
                 return False
 
+        for edge in chain:
+            if edge.block:
+                self._grant(edge.block, train_id)
+        return True
+
+    async def try_claim(self, train_id: str, chain: List[Edge]) -> bool:
+        """
+        Claim every block in `chain` for `train_id` only if all are free (or
+        already its own), without queueing on a conflict.
+
+        For a train that has already physically entered the chain (e.g. after
+        a missed sensor read): a denial means another train holds a block it
+        is now in, which the caller must treat as a failure, not a wait.
+        """
+        for edge in chain:
+            if not edge.block:
+                continue
+            owner = self._reserved_by.get(edge.block)
+            if owner is not None and owner != train_id:
+                return False
         for edge in chain:
             if edge.block:
                 self._grant(edge.block, train_id)
@@ -174,7 +194,10 @@ class BlockManager:
         return retries
 
     async def set_switches_for_chain(
-        self, chain: List[Edge], switch_controller: SwitchController
+        self,
+        chain: List[Edge],
+        switch_controller: SwitchController,
+        exclude: Optional[Set[str]] = None,
     ) -> bool:
         """
         Set every switch a chain of edges requires, all-or-nothing.
@@ -183,8 +206,11 @@ class BlockManager:
         switch denies the whole chain rather than leaving a mixed state.
         Manual switches are skipped (the dispatcher can't actuate them) but
         still logged, so an operator can verify they're hand-set correctly.
+        Switches in `exclude` are left untouched.
         """
         for switch_id, diverge in self._track_model.route_switch_settings(chain):
+            if exclude and switch_id in exclude:
+                continue
             switch = self._track_model.switches.get(switch_id)
             if switch is None:
                 logger.error(f"Unknown switch_id {switch_id} in requested chain")
