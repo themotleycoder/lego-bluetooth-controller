@@ -333,9 +333,11 @@ def main():
                 print("MQTT check_msg failed, will reconnect:", e)
                 mqtt_client = None
 
-        if mqtt_client is not None and time.ticks_diff(
-            time.ticks_ms(), _last_mqtt_activity_ms
-        ) >= _MQTT_PING_INTERVAL_MS:
+        if (
+            mqtt_client is not None
+            and time.ticks_diff(time.ticks_ms(), _last_mqtt_activity_ms)
+            >= _MQTT_PING_INTERVAL_MS
+        ):
             try:
                 mqtt_client.ping()
                 _note_mqtt_activity()
