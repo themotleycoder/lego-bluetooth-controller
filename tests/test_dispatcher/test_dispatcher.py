@@ -160,25 +160,46 @@ class TestTagEventHandling:
         train_controller.handle_command.assert_awaited_with(TRN_B_HUB, 0)
 
     async def test_queued_train_resumes_once_block_is_released(self):
+        # TRN-A runs B->D->E; TRN-B only wants B->D, so it queues on BLK_BD.
+        model = build_two_train_model()
+        model.configure_switch_wiring("E", hub_id=2, port_name="SWITCH_A")
+        model.register_train("TRN-A", hub_id=TRN_A_HUB, route=["B", "D", "E"])
+        model.set_self_drive("TRN-A", True)
         (
             dispatcher,
             model,
             bridge,
             train_controller,
             switch_controller,
-        ) = build_dispatcher()
+        ) = build_dispatcher(model=model)
 
         await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))
         await dispatcher._handle_tag_event(TagEvent("TRN-B", "1", 1.0))  # queued
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 2.0))  # nose on BD
         train_controller.handle_command.reset_mock()
 
-        await dispatcher._handle_tag_event(
-            TagEvent("TRN-A", "1", 2.0)
-        )  # releases BLK_BD
+        # TRN-A's tail may still be in BLK_BD, so it stays held through the
+        # next chain's confirmation and only frees once the nose is further on.
+        assert not model.is_block_free("BLK_BD")
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "3", 3.0))
 
         train_controller.handle_command.assert_any_await(
             TRN_B_HUB, dispatcher._settings.dispatcher_cruise_power
         )
+
+    async def test_confirmed_chain_is_held_until_the_next_one_confirms(self):
+        dispatcher, model, *_ = build_dispatcher()
+        bd, de_s = model.edges["BD"], model.edges["DE_S"]
+
+        assert dispatcher._edges_safe_to_release("TRN-A", [bd]) == []
+        assert dispatcher._edges_safe_to_release("TRN-A", [de_s]) == [bd]
+
+    async def test_edge_reused_by_the_next_chain_is_not_released(self):
+        dispatcher, model, *_ = build_dispatcher()
+        bd = model.edges["BD"]
+
+        dispatcher._edges_safe_to_release("TRN-A", [bd])
+        assert dispatcher._edges_safe_to_release("TRN-A", [bd]) == []
 
     async def test_unregistered_train_is_ignored(self):
         (
@@ -225,25 +246,75 @@ class TestSmartDriveDispatch:
         train_controller.handle_command.assert_awaited_with(TRN_B_HUB, 0)
 
     async def test_queued_smart_drive_train_resumes_once_block_is_released(self):
+        model = build_two_smart_drive_train_model()
+        model.configure_switch_wiring("E", hub_id=2, port_name="SWITCH_A")
         (
             dispatcher,
             model,
             bridge,
             train_controller,
             switch_controller,
-        ) = build_dispatcher(model=build_two_smart_drive_train_model())
+        ) = build_dispatcher(model=model)
 
         await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))
         await dispatcher._handle_tag_event(TagEvent("TRN-B", "1", 1.0))  # queued
+        # Nose reaches D; TRN-A takes the D->E crossover (sensor 7) next.
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 2.0))
         train_controller.handle_command.reset_mock()
 
-        await dispatcher._handle_tag_event(
-            TagEvent("TRN-A", "1", 2.0)
-        )  # releases BLK_BD
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "7", 3.0))
 
         train_controller.handle_command.assert_any_await(
             TRN_B_HUB, dispatcher._settings.dispatcher_cruise_power
         )
+
+
+class TestStartBlocks:
+    async def test_enabling_self_drive_holds_every_block_at_the_start_switch(self):
+        dispatcher, model, *_ = build_dispatcher(
+            model=build_two_smart_drive_train_model()
+        )
+
+        await dispatcher.set_self_drive("TRN-A", True)
+
+        for block in ("BLK_BD", "BLK_BK", "BLK_BG"):
+            assert model.blocks[block].occupied_by == "TRN-A"
+
+    async def test_start_blocks_are_freed_once_the_first_chain_clears_them(self):
+        dispatcher, model, *_ = build_dispatcher(
+            model=build_two_smart_drive_train_model()
+        )
+        await dispatcher.set_self_drive("TRN-A", True)
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))  # nose on BD
+
+        # BD is TRN-A's own first chain, held until the next confirmation;
+        # the other two were only start holds.
+        assert model.blocks["BLK_BD"].occupied_by == "TRN-A"
+        assert model.is_block_free("BLK_BK")
+        assert model.is_block_free("BLK_BG")
+
+    async def test_disabling_self_drive_releases_the_start_blocks(self):
+        dispatcher, model, *_ = build_dispatcher(
+            model=build_two_smart_drive_train_model()
+        )
+        await dispatcher.set_self_drive("TRN-A", True)
+
+        await dispatcher.set_self_drive("TRN-A", False)
+
+        assert all(block.occupied_by is None for block in model.blocks.values())
+
+    async def test_overlapping_start_positions_warn_and_leave_blocks_alone(
+        self, caplog
+    ):
+        dispatcher, model, *_ = build_dispatcher(
+            model=build_two_smart_drive_train_model()
+        )
+        await dispatcher.set_self_drive("TRN-A", True)
+
+        await dispatcher.set_self_drive("TRN-B", True)  # also starts at B
+
+        assert "starts at switch B" in caplog.text
+        assert model.blocks["BLK_BK"].occupied_by == "TRN-A"
 
 
 class TestSelfDrive:
@@ -474,13 +545,15 @@ class TestMissedReadRecovery:
             for call in train_controller.handle_command.await_args_list
         )
 
-    async def test_skipped_blocks_are_released_after_recovery(self):
+    async def test_skipped_blocks_stay_held_after_recovery(self):
         dispatcher, model, *_ = await self._kicked_off()
 
         await dispatcher._handle_tag_event(TagEvent("TRN-A", "3", time.time()))
 
-        assert model.is_block_free("BLK_BD")
-        assert model.is_block_free("BLK_DE_S")
+        # The nose has only just reached sensor 3, so the tail may still be
+        # in either block; both are freed once the next chain confirms.
+        assert not model.is_block_free("BLK_BD")
+        assert not model.is_block_free("BLK_DE_S")
 
     async def test_skipping_into_a_block_held_by_another_train_stops_all(self):
         dispatcher, model, bridge, train_controller, _ = await self._kicked_off()

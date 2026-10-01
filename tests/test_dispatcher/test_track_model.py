@@ -429,3 +429,33 @@ class TestSecondsSinceLastTag:
     def test_seconds_since_last_tag_unknown_train_is_zero(self):
         model = TrackModel()
         assert model.seconds_since_last_tag("GHOST", now=100.0) == 0.0
+
+
+class TestSmartDriveAvoidsOccupiedExits:
+    def _model(self) -> TrackModel:
+        model = TrackModel()
+        model.register_train("A", "hub-a", smart_drive=True, start_switch="D")
+        return model
+
+    def test_unoccupied_exit_with_oldest_visit_wins_by_default(self):
+        model = self._model()
+        edge = model._choose_next_edge("A", "D")
+        assert edge.id == "BD"
+
+    def test_exit_held_by_another_train_is_skipped(self):
+        model = self._model()
+        model.occupy_block("BLK_BD", "B")
+        assert model._choose_next_edge("A", "D").id == "DE_D"
+        model.occupy_block("BLK_DE_D", "B")
+        assert model._choose_next_edge("A", "D").id == "DE_S"
+
+    def test_own_blocks_do_not_count_as_occupied(self):
+        model = self._model()
+        model.occupy_block("BLK_BD", "A")
+        assert model._choose_next_edge("A", "D").id == "BD"
+
+    def test_falls_back_to_oldest_when_every_exit_is_held(self):
+        model = self._model()
+        for block in ("BLK_BD", "BLK_DE_D", "BLK_DE_S"):
+            model.occupy_block(block, "B")
+        assert model._choose_next_edge("A", "D").id == "BD"

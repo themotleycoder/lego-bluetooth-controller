@@ -194,3 +194,27 @@ class TestSetSwitchesForChain:
 
         assert result is True
         switch_controller.send_command_with_retry.assert_not_awaited()
+
+
+class TestClaimAvailable:
+    async def test_claims_free_blocks_and_reports_held_ones(self):
+        model = TrackModel()
+        manager = BlockManager(model)
+        bd, de_s = model.edges["BD"], model.edges["DE_S"]
+        assert await manager.request_entry("B", [de_s])
+
+        unavailable = await manager.claim_available("A", [bd, de_s])
+
+        assert unavailable == [de_s]
+        assert model.blocks["BLK_BD"].occupied_by == "A"
+        assert model.blocks["BLK_DE_S"].occupied_by == "B"
+
+    async def test_does_not_queue_on_a_held_block(self):
+        model = TrackModel()
+        manager = BlockManager(model)
+        de_s = model.edges["DE_S"]
+        assert await manager.request_entry("B", [de_s])
+
+        await manager.claim_available("A", [de_s])
+
+        assert await manager.release("B", [de_s]) == []
