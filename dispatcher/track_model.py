@@ -731,7 +731,8 @@ class TrackModel:
         """
         Pick the next edge for a smart-drive train, favoring full coverage.
 
-        Always prefers the least-recently-visited candidate (never-visited
+        Prefers candidates no other train holds, then the
+        least-recently-visited of those (never-visited
         edges rank above any visited one), avoids immediately reversing back
         along the edge just traversed when an alternative exists, and never
         departs via a manual switch's straight/diverge port (see
@@ -763,7 +764,19 @@ class TrackModel:
         non_reversing = [e for e in candidates if e.id != last_edge_id]
         pool = non_reversing or candidates
 
+        # Prefer an exit nobody else is in: a train that insists on the
+        # least-recently-visited edge even when another train holds it just
+        # waits there, and two trains each wanting the other's edge deadlock.
+        # If every exit is taken the train still picks one and queues.
+        free = [e for e in pool if self._block_free_for(e, train_id)]
+        pool = free or pool
+
         return min(pool, key=lambda e: (edge_tick.get(e.id, -1), e.id))
+
+    def _block_free_for(self, edge: Edge, train_id: str) -> bool:
+        """True if the edge's block is unoccupied or already held by `train_id`."""
+        block = self.blocks.get(edge.block)
+        return block is None or block.occupied_by in (None, train_id)
 
     def _next_chain_smart_drive(self, train_id: str) -> Optional[list[Edge]]:
         """Dynamic analog of the fixed-route chain-building loop above."""

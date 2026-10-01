@@ -59,6 +59,9 @@ class Dispatcher:
         self._emergency = False
         self._emergency_train_id: Optional[str] = None
         self._pending_chain: Dict[str, List[Edge]] = {}
+        # Chain each train confirmed last time, still held because its tail may
+        # not have cleared it yet -- see _edges_safe_to_release.
+        self._awaiting_release: Dict[str, List[Edge]] = {}
 
     @property
     def track_model(self) -> TrackModel:
@@ -165,7 +168,8 @@ class Dispatcher:
 
         if result.edges_completed:
             retry_trains = await self._block_manager.release(
-                event.train_id, result.edges_completed
+                event.train_id,
+                self._edges_safe_to_release(event.train_id, result.edges_completed),
             )
             for retry_train in retry_trains:
                 retry_chain = self._track_model.next_block_chain_for_train(retry_train)
@@ -176,6 +180,23 @@ class Dispatcher:
 
         next_chain = self._track_model.next_block_chain_for_train(event.train_id)
         await self._attempt_advance(event.train_id, next_chain)
+
+    def _edges_safe_to_release(
+        self, train_id: str, completed: List[Edge]
+    ) -> List[Edge]:
+        """
+        Edges that can be freed now that `completed` has just been confirmed.
+
+        The RFID reader sits on the train's nose, so a confirmed read means the
+        nose has reached the tag while the tail is still behind it, usually in
+        the chain's last block. Freeing `completed` right away would let a
+        waiting train drive into a block the tail is still in. Instead the
+        previously confirmed chain is freed (the whole train has passed it by
+        now) and `completed` is held until the next confirmation.
+        """
+        previous = self._awaiting_release.get(train_id, [])
+        self._awaiting_release[train_id] = list(completed)
+        return [edge for edge in previous if edge not in completed]
 
     async def _recover_missed_read(
         self, event: TagEvent, sensor_id: int, received_at: float
@@ -280,16 +301,40 @@ class Dispatcher:
         self._track_model.set_self_drive(train_id, enabled)
 
         if enabled:
+            await self._claim_start_blocks(train_id)
             chain = self._track_model.next_block_chain_for_train(train_id)
             await self._attempt_advance(train_id, chain)
         else:
             await self._stop_train(train_id)
+            self._awaiting_release.pop(train_id, None)
             retry_trains = await self._block_manager.release_all(train_id)
             for retry_train in retry_trains:
                 retry_chain = self._track_model.next_block_chain_for_train(retry_train)
                 await self._attempt_advance(retry_train, retry_chain)
 
         return True
+
+    async def _claim_start_blocks(self, train_id: str) -> None:
+        """
+        Hold every block touching the train's switch until its first chain
+        confirms.
+
+        Before its first tag read nothing says where on the track the train
+        physically is, only that it is at or heading for its recorded switch.
+        Without this, a neighbouring block would look free and could be
+        granted to another train that then drives straight into it.
+        """
+        position = self._track_model.train_position.get(train_id)
+        if position is None:
+            return
+        edges = self._track_model.edges_from(position)
+        unavailable = await self._block_manager.claim_available(train_id, edges)
+        if unavailable:
+            logger.warning(
+                f"Train {train_id} starts at switch {position} but another train "
+                f"holds {[e.id for e in unavailable]}; check the start positions"
+            )
+        self._awaiting_release[train_id] = [e for e in edges if e not in unavailable]
 
     async def _stop_train(self, train_id: str) -> None:
         """Stop a train and mark it as intentionally stopped."""

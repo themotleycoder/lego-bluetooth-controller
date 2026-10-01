@@ -79,6 +79,24 @@ class BlockManager:
                 self._grant(edge.block, train_id)
         return True
 
+    async def claim_available(self, train_id: str, edges: List[Edge]) -> List[Edge]:
+        """
+        Claim every edge's block that is free (or already `train_id`'s own).
+
+        Unlike `request_entry` this is per-edge and never queues. Returns the
+        edges whose block another train holds, which were not claimed.
+        """
+        unavailable: List[Edge] = []
+        for edge in edges:
+            if not edge.block:
+                continue
+            owner = self._reserved_by.get(edge.block)
+            if owner is not None and owner != train_id:
+                unavailable.append(edge)
+            else:
+                self._grant(edge.block, train_id)
+        return unavailable
+
     def _grant(self, block_id: str, train_id: str) -> None:
         self._reserved_by[block_id] = train_id
         self._track_model.occupy_block(block_id, train_id)

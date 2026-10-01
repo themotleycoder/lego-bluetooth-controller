@@ -71,6 +71,10 @@ class SimTrain:
     coast_left: Optional[float] = None
     stopped_s: float = 0.0
     edges_entered: List[str] = field(default_factory=list)
+    # Edge the tail is still in after the nose has left it, and how many more
+    # seconds of motion until the tail clears it (the reader is on the nose).
+    trail: Optional[Edge] = None
+    trail_left: float = 0.0
 
     @property
     def moving(self) -> bool:
@@ -79,9 +83,14 @@ class SimTrain:
 
     def places(self) -> set[Place]:
         """Track pieces this train physically occupies."""
-        if self.edge is not None:
-            return {("edge", self.edge.id)}
-        return {("node", self.node or "?")}
+        places: set[Place] = (
+            {("edge", self.edge.id)}
+            if self.edge is not None
+            else {("node", self.node or "?")}
+        )
+        if self.trail is not None:
+            places.add(("edge", self.trail.id))
+        return places
 
 
 @dataclass
@@ -162,6 +171,8 @@ class Simulation:
         coast_s: float = 0.3,
         tag_latency: float = 0.2,
         command_latency: float = 0.3,
+        train_length_cm: float = 26.0,
+        speed_cm_s: float = 25.0,
     ) -> None:
         """Build the track, register trains at random distinct switches."""
         self.seed = seed
@@ -170,6 +181,7 @@ class Simulation:
         self.coast_s = coast_s
         self.tag_latency = tag_latency
         self.command_latency = command_latency
+        self.train_len_s = train_length_cm / speed_cm_s
         self.now = 0.0
         self.outcome: Optional[str] = None
         self.detail = ""
@@ -222,7 +234,14 @@ class Simulation:
                 probe.register_train(
                     f"P{i}", f"p{i}", smart_drive=True, start_switch=start
                 )
-            if all(probe.next_block_chain_for_train(f"P{i}") for i in range(n_trains)):
+            if not all(
+                probe.next_block_chain_for_train(f"P{i}") for i in range(n_trains)
+            ):
+                continue
+            # Trains on neighbouring switches share an edge, which the
+            # dispatcher can't tell apart at startup (see _claim_start_blocks).
+            touching = [{e.id for e in probe.edges_from(start)} for start in starts]
+            if sum(len(t) for t in touching) == len(set().union(*touching)):
                 return starts
 
     # ------------------------------------------------------------------
@@ -304,6 +323,8 @@ class Simulation:
                 train.elapsed += dt
                 if train.coast_left is not None:
                     train.coast_left -= dt
+                if train.trail is not None:
+                    train.trail_left -= dt
             else:
                 train.stopped_s += dt
 
@@ -319,11 +340,14 @@ class Simulation:
             if train.tags_left:
                 at = self.now + max(0.0, train.tags_left[0][0] - train.elapsed)
                 candidates.append((at, 2, train.train_id, "tag", train))
+            if train.trail is not None:
+                at = self.now + max(0.0, train.trail_left)
+                candidates.append((at, 3, train.train_id, "clear", train))
             at = self.now + max(0.0, train.length - train.elapsed)
-            candidates.append((at, 3, train.train_id, "arrive", train))
+            candidates.append((at, 4, train.train_id, "arrive", train))
             if train.coast_left is not None:
                 at = self.now + max(0.0, train.coast_left)
-                candidates.append((at, 4, train.train_id, "coast", train))
+                candidates.append((at, 5, train.train_id, "coast", train))
         if not candidates:
             return None
         return min(candidates, key=lambda c: c[:3])
@@ -353,6 +377,10 @@ class Simulation:
             )
         elif kind == "arrive":
             self._arrive(ref)  # type: ignore[arg-type]
+        elif kind == "clear":
+            train = ref  # type: ignore[assignment]
+            train.trail = None
+            train.trail_left = 0.0
         elif kind == "coast":
             train = ref  # type: ignore[assignment]
             train.coast_left = None
@@ -374,6 +402,7 @@ class Simulation:
     def _arrive(self, train: SimTrain) -> None:
         was_powered = train.power_on
         train.node = train.exit_node
+        train.trail, train.trail_left = train.edge, self.train_len_s
         train.edge = None
         train.elapsed = 0.0
         train.tags_left = []
@@ -410,6 +439,10 @@ class Simulation:
 
     async def run(self) -> SimResult:
         """Simulate until the duration elapses, a violation occurs, or a stall."""
+        # All trains are placed before any is enabled, so none is granted a
+        # chain through another's starting switch.
+        for train_id in self.trains:
+            await self.dispatcher._claim_start_blocks(train_id)
         for train_id in self.trains:
             await self.dispatcher.set_self_drive(train_id, True)
         self._check_places()
@@ -511,12 +544,19 @@ def main() -> None:
         default=0.5,
         help="where along an edge its sensor sits (0-1) for single-sensor edges",
     )
+    parser.add_argument("--train-length-cm", type=float, default=26.0)
+    parser.add_argument("--speed-cm-s", type=float, default=25.0)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
     seeds = list(range(args.seed_start, args.seed_start + args.seeds))
     results = run_seeds(
-        args.trains, seeds, args.duration, tag_fraction=args.tag_fraction
+        args.trains,
+        seeds,
+        args.duration,
+        tag_fraction=args.tag_fraction,
+        train_length_cm=args.train_length_cm,
+        speed_cm_s=args.speed_cm_s,
     )
     if args.verbose:
         for r in results:

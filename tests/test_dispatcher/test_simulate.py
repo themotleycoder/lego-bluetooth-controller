@@ -54,15 +54,8 @@ class TestSimulation:
         sim._check_places()
         assert sim.outcome == "collision"
 
-    # Known gap, found by this simulator: the dispatcher frees a block as
-    # soon as the train's tag is read, but the tag sits part-way along the
-    # block, so a waiting train is granted it while the first is still inside.
-    # strict=True so fixing the dispatcher forces this marker to be removed.
-    @pytest.mark.xfail(
-        strict=True, reason="block released at tag read while train still inside it"
-    )
-    def test_two_trains_do_not_collide(self):
-        results = run_seeds(2, list(range(5)), 600.0)
+    def test_two_trains_run_clean(self):
+        results = run_seeds(2, list(range(10)), 600.0)
         assert all(r.outcome == "ok" for r in results), [
             (r.seed, r.outcome, r.detail) for r in results
         ]
