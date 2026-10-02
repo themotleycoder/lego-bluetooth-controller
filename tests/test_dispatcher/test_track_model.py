@@ -9,7 +9,7 @@ class TestTopologyShape:
     def test_topology_shape(self):
         model = TrackModel()
         assert len(model.switches) == 10
-        assert len(model.sensors) == 9
+        assert len(model.sensors) == 14
         assert len(model.edges) == 15
         assert len(model.blocks) == 15
 
@@ -62,9 +62,9 @@ class TestTopologyShape:
 
     def test_route_blocks_and_sensors(self):
         model = TrackModel()
-        route = model.find_route("C", "G")  # CF (no sensor), FG (sensor 4)
+        route = model.find_route("C", "G")  # CF (sensor 11), FG (sensors 13, 4)
         assert model.route_blocks(route) == ["BLK_CF", "BLK_FG"]
-        assert model.route_sensors(route) == [4]
+        assert model.route_sensors(route) == [11, 13, 4]
 
 
 class TestSwitchAndSensorWiring:
@@ -156,14 +156,13 @@ class TestChainAdvancement:
     def test_next_block_chain_stops_at_first_sensored_edge(self):
         model = self._build()
         chain = model.next_block_chain_for_train("T1")
-        assert [e.id for e in chain] == ["AC", "CF", "FG"]
+        assert [e.id for e in chain] == ["AC"]
 
     def test_next_block_chain_spans_multiple_sensorless_edges(self):
-        model = self._build()
-        model.grant_pending_chain("T1", model.next_block_chain_for_train("T1"))
-        model.record_tag_event("T1", 4, timestamp=1.0)  # completes AC,CF,FG -> pos G
+        model = TrackModel()
+        model.register_train("T1", hub_id="90:84:2B:18:28:36", route=["G", "H", "A"])
         chain = model.next_block_chain_for_train("T1")
-        assert [e.id for e in chain] == ["GH", "AH"]
+        assert [e.id for e in chain] == ["GH", "AH"]  # GH has no sensor
 
     def test_next_block_chain_for_unknown_train_is_none(self):
         model = self._build()
@@ -172,11 +171,11 @@ class TestChainAdvancement:
     def test_record_tag_event_confirms_pending_chain(self):
         model = self._build()
         model.grant_pending_chain("T1", model.next_block_chain_for_train("T1"))
-        result = model.record_tag_event("T1", 4, timestamp=1.0)
+        result = model.record_tag_event("T1", 12, timestamp=1.0)
         assert result.previous_position == "A"
-        assert result.current_position == "G"
-        assert [e.id for e in result.edges_completed] == ["AC", "CF", "FG"]
-        assert model.train_position["T1"] == "G"
+        assert result.current_position == "C"
+        assert [e.id for e in result.edges_completed] == ["AC"]
+        assert model.train_position["T1"] == "C"
 
     def test_record_tag_event_for_sensor_not_pending_is_ignored(self):
         model = self._build()
