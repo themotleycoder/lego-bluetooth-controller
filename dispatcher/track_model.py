@@ -197,6 +197,7 @@ class TrackModel:
         self._train_edge_tick: dict[str, dict[str, int]] = {}
         self._train_tick: dict[str, int] = {}
         self._train_last_edge: dict[str, Optional[str]] = {}
+        self._train_start_switch: dict[str, Optional[str]] = {}
 
         self._build()
 
@@ -529,6 +530,7 @@ class TrackModel:
             initial_position = start_switch
         else:
             initial_position = next(iter(self.switches))
+        self._train_start_switch[train_id] = start_switch
         self.train_position[train_id] = initial_position
         self._train_route_index[train_id] = 0
         self._pending_edges[train_id] = []
@@ -539,6 +541,27 @@ class TrackModel:
         self._train_tick[train_id] = 0
         self._train_last_edge[train_id] = None
         self._train_last_confirmed_edge.pop(train_id, None)
+
+    def reset_train(self, train_id: str) -> None:
+        """
+        Put a train back to its just-registered state: start position,
+        route index, no pending/confirmed edges, stopped, self-drive off.
+
+        Used to recover after a manual repositioning without restarting the
+        service. Blocks the train occupies are freed too.
+        """
+        train = self.trains[train_id]
+        for block in self.blocks.values():
+            if block.occupied_by == train_id:
+                block.occupied_by = None
+        self._train_last_tag_time.pop(train_id, None)
+        self.register_train(
+            train_id,
+            train.hub_id,
+            route=train.route,
+            smart_drive=self._train_smart_drive.get(train_id, False),
+            start_switch=self._train_start_switch.get(train_id),
+        )
 
     def is_smart_drive(self, train_id: str) -> bool:
         """True if this train picks its next edge dynamically instead of a fixed route."""

@@ -63,6 +63,20 @@ class TestRequestEntry:
         assert model.is_block_free("BLK_BD") is True
 
 
+class TestReset:
+    async def test_reset_frees_blocks_and_clears_queues(self):
+        model = build_model()
+        bm = BlockManager(model)
+        chain = model.next_block_chain_for_train("T1")
+        await bm.request_entry("T1", chain)
+        assert await bm.request_entry("T2", chain) is False
+
+        bm.reset()
+
+        assert all(model.is_block_free(e.block) for e in chain)
+        assert await bm.request_entry("T2", chain) is True
+
+
 class TestResolveContention:
     def test_closer_train_wins_farther_train_held(self):
         model = build_model()

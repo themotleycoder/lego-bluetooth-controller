@@ -317,6 +317,43 @@ class TestStartBlocks:
         assert model.blocks["BLK_BK"].occupied_by == "TRN-A"
 
 
+class TestReset:
+    async def test_reset_stops_trains_and_restores_start_state(self):
+        (
+            dispatcher,
+            model,
+            bridge,
+            train_controller,
+            switch_controller,
+        ) = build_dispatcher()
+        await dispatcher._handle_tag_event(TagEvent("TRN-A", "1", 1.0))
+        await dispatcher._emergency_stop_all("TRN-A")
+        train_controller.handle_command.reset_mock()
+
+        positions = await dispatcher.reset()
+
+        assert positions == {"TRN-A": "B", "TRN-B": "B"}
+        assert dispatcher._emergency is False
+        assert model.is_self_drive("TRN-A") is False
+        assert all(model.is_block_free(b) for b in model.blocks)
+        train_controller.handle_command.assert_any_await(TRN_A_HUB, 0)
+        train_controller.handle_command.assert_any_await(TRN_B_HUB, 0)
+
+    async def test_reset_does_not_touch_ble_connections(self):
+        (
+            dispatcher,
+            model,
+            bridge,
+            train_controller,
+            switch_controller,
+        ) = build_dispatcher()
+
+        await dispatcher.reset()
+
+        train_controller.assert_not_called()
+        switch_controller.send_command_with_retry.assert_not_awaited()
+
+
 class TestSelfDrive:
     async def test_train_with_self_drive_off_does_not_advance_on_tag_event(self):
         (

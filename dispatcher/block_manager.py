@@ -211,6 +211,13 @@ class BlockManager:
                 retries.append(winner)
         return retries
 
+    def reset(self) -> None:
+        """Forget every reservation and queued request, freeing all blocks."""
+        for block_id in list(self._reserved_by):
+            self._track_model.free_block(block_id)
+        self._reserved_by.clear()
+        self._pending.clear()
+
     async def set_switches_for_chain(
         self,
         chain: List[Edge],

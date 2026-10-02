@@ -441,3 +441,33 @@ class TestCORSHeaders:
         # Check for CORS headers (if properly configured)
         # FastAPI/Starlette adds these automatically
         assert response.status_code == status.HTTP_200_OK
+
+
+class TestDispatcherResetEndpoint:
+    """Test suite for the /dispatcher/reset endpoint."""
+
+    def test_reset_without_auth(self, client):
+        response = client.post("/dispatcher/reset")
+
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_reset_dispatcher_disabled(self, client, test_api_key):
+        response = client.post("/dispatcher/reset", headers={"X-API-Key": test_api_key})
+
+        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+
+    def test_reset_returns_positions(self, client, test_api_key):
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.reset = AsyncMock(return_value={"TRN-A": "B", "TRN-B": "D"})
+
+        with patch("webservice.train_service.dispatcher", mock_dispatcher):
+            response = client.post(
+                "/dispatcher/reset", headers={"X-API-Key": test_api_key}
+            )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json() == {
+            "status": "success",
+            "positions": {"TRN-A": "B", "TRN-B": "D"},
+        }
+        mock_dispatcher.reset.assert_awaited_once()

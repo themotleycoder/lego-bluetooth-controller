@@ -405,6 +405,40 @@ class TestSmartDrive:
         assert set(model._train_edge_tick["T1"]) == {e.id for e in chain}
 
 
+class TestResetTrain:
+    def test_reset_returns_train_to_start_state(self):
+        model = TrackModel()
+        model.register_train("T1", hub_id="90:84:2B:18:28:36", route=["B", "D", "E"])
+        model.set_self_drive("T1", True)
+        model.grant_pending_chain("T1", model.next_block_chain_for_train("T1"))
+        model.record_tag_event("T1", 1, timestamp=1.0)
+        model.mark_stopped("T1", False)
+        model.occupy_block("BLK_BD", "T1")
+        model.mark_tag_seen("T1", 1.0)
+        assert model.train_position["T1"] == "D"
+
+        model.reset_train("T1")
+
+        assert model.train_position["T1"] == "B"
+        assert model.is_self_drive("T1") is False
+        assert model.is_moving("T1") is False
+        assert model.has_pending_edges("T1") is False
+        assert model.is_block_free("BLK_BD") is True
+        assert model.seconds_since_last_tag("T1", now=10.0) == 0
+
+    def test_reset_keeps_smart_drive_start_switch(self):
+        model = TrackModel()
+        model.register_train(
+            "T1", hub_id="90:84:2B:18:28:36", smart_drive=True, start_switch="F"
+        )
+        model.train_position["T1"] = "A"
+
+        model.reset_train("T1")
+
+        assert model.is_smart_drive("T1") is True
+        assert model.train_position["T1"] == "F"
+
+
 class TestBlockOccupancy:
     def test_block_starts_free(self):
         model = TrackModel()

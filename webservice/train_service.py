@@ -343,6 +343,32 @@ async def control_train_power(
 
 
 @app.post(
+    "/dispatcher/reset",
+    tags=["Train Control"],
+    summary="Reset dispatcher state",
+    description=(
+        "Stop all trains and reset the dispatcher's positions, held blocks and "
+        "emergency stop, without disconnecting any hub. Self-drive is turned "
+        "off; place each train at its route's first switch before re-enabling."
+    ),
+)
+@limiter.limit("10/minute")
+async def reset_dispatcher(request: Request, api_key: str = Depends(api_key_header)):
+    """Reset the dispatcher to its just-started state without touching BLE."""
+    await verify_api_key(api_key)
+
+    if dispatcher is None:
+        raise HTTPException(status_code=503, detail="Dispatcher is not enabled")
+
+    try:
+        positions = await dispatcher.reset()
+        return {"status": "success", "positions": positions}
+    except Exception as e:
+        logger.error(f"Dispatcher reset failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
     "/selfdrive",
     tags=["Train Control"],
     summary="Toggle autonomous dispatcher control",

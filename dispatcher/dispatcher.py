@@ -314,6 +314,28 @@ class Dispatcher:
 
         return True
 
+    async def reset(self) -> Dict[str, str]:
+        """
+        Stop every train and return the dispatcher to its just-started state.
+
+        Clears the emergency latch, held blocks, pending chains and each
+        train's position (back to its route's first switch), and turns
+        self-drive off. Touches no BLE connection, so hubs stay connected --
+        use it after repositioning trains by hand instead of restarting the
+        service. Returns each train's resulting position.
+        """
+        for train_id in list(self._track_model.trains):
+            await self._stop_train(train_id)
+        self._emergency = False
+        self._emergency_train_id = None
+        self._pending_chain.clear()
+        self._awaiting_release.clear()
+        self._block_manager.reset()
+        for train_id in list(self._track_model.trains):
+            self._track_model.reset_train(train_id)
+        logger.info("Dispatcher state reset")
+        return dict(self._track_model.train_position)
+
     async def _claim_start_blocks(self, train_id: str) -> None:
         """
         Hold every block touching the train's switch until its first chain
