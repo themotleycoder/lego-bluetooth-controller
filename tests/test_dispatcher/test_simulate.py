@@ -1,5 +1,7 @@
 """Tests for the virtual-time dispatcher simulator (dispatcher/simulate.py)."""
 
+import asyncio
+
 import pytest
 
 from dispatcher.simulate import (
@@ -8,6 +10,14 @@ from dispatcher.simulate import (
     run_seeds,
     window_variety,
 )
+
+
+@pytest.fixture(autouse=True)
+def restore_event_loop():
+    """run_seeds() uses asyncio.run(), which leaves the main thread with no
+    current event loop; later tests calling asyncio.get_event_loop() would fail."""
+    yield
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 class TestPathMetrics:
